@@ -73,13 +73,17 @@ Install it, and your main Claude Code session adopts a **foreman mindset**: heav
 | 🔬 `reviewer` | independently review a deliverable before accepting it |
 | ✅ `qa` | run tests, verify acceptance, collect evidence |
 | 🩹 `fixer` | reproduce → root-cause → patch a finding or test failure |
-| 🦺 `coordinator` | the foreman itself — full tools, dispatches the crew |
+| 🦺 `coordinator` | the foreman — full tools, dispatches the crew (this is what the main session becomes) |
 
 ---
 
 ## Quick start
 
-**1. Install** — drop `Worker-Mode-for-Claude-Code/` into your project's plugin directory.
+**1. Clone into your Claude agents directory:**
+
+```bash
+git clone https://github.com/Hugh4424/Worker-Mode-for-Claude-Code ~/.claude/Worker-Mode-for-Claude-Code
+```
 
 **2. Set the one required env var:**
 
@@ -108,6 +112,7 @@ Two post-hoc CLIs — one-shot, never resident, zero overhead during tasks.
 node tools/check-metrics.mjs --log $WORKER_LOG_PATH
 
 # What the foreman carried itself that it should have dispatched
+# transcript.jsonl = Claude Code session file, found at ~/.claude/projects/<project>/
 node tools/check-context-health.mjs <transcript.jsonl>
 ```
 

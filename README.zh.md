@@ -73,13 +73,17 @@
 | 🔬 `reviewer` | 产物被接受前做独立审查 |
 | ✅ `qa` | 跑测试、做验收、收可证伪证据 |
 | 🩹 `fixer` | 复现 → 找根因 → 修 finding 或失败 |
-| 🦺 `coordinator` | 工头本体——带全工具，负责派活 |
+| 🦺 `coordinator` | 工头本体——带全工具，负责派活（主会话就是这个角色） |
 
 ---
 
 ## 快速上手
 
-**1. 安装** — 把 `Worker-Mode-for-Claude-Code/` 整个目录放进项目的 plugin 位置。
+**1. 克隆到本地：**
+
+```bash
+git clone https://github.com/Hugh4424/Worker-Mode-for-Claude-Code ~/.claude/Worker-Mode-for-Claude-Code
+```
 
 **2. 配好唯一必填项：**
 
@@ -108,6 +112,7 @@ bash scripts/setup-delegation-workers.sh
 node tools/check-metrics.mjs --log $WORKER_LOG_PATH
 
 # 工头自己扛了多少本该派出去的活（读主会话转录）
+# 转录文件在 ~/.claude/projects/<项目>/ 目录下
 node tools/check-context-health.mjs <主会话转录.jsonl>
 ```
 
