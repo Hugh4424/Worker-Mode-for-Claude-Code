@@ -1,13 +1,11 @@
 <div align="center">
 
-# 🦺 Worker-Mode-for-Claude-Code
+# 🦺 Worker Mode for Claude Code
 
-### Turn your Claude Code main session into a **foreman**, not a laborer.
+### Stop Claude from doing all the work itself. Make it delegate.
 
-**Pure incentive · zero interception · fully portable**
-
-It doesn't block you. It doesn't gate you. It changes the *one thought* you have when work starts:
-**"Should I do this myself, or hand it off?"**
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
 
 **English** · [中文](README.zh.md)
 
@@ -15,166 +13,119 @@ It doesn't block you. It doesn't gate you. It changes the *one thought* you have
 
 ---
 
-## The problem this was born from
+## What problem does this solve?
 
-A real investigation kicked it off:
+If you use Claude Code for long development sessions, you've probably hit this:
 
-> **"For the last 10-ish days, my Opus usage has been 20× my Sonnet usage… help me find out why."**
+> **"My Opus usage is 20× my Sonnet usage. Why is my main session eating so many tokens?"**
 
-The cause: the **orchestrator** (your main Claude Code session) keeps reading files and editing code *itself* instead of dispatching sub-agents — pouring all the heavy work into the most expensive model.
+The cause: **Claude's main session keeps doing all the heavy lifting itself** — reading large files, running grep 100+ times, editing code — instead of dispatching sub-agents. Everything piles into your most expensive model.
 
-Then the hard numbers from three real sessions:
+Real numbers from three actual sessions before this plugin:
 
-| What the orchestrator did | Measured |
+| What the main session did | Measured |
 |---|---|
-| Delegation rate | **only 1–2%** |
-| Times it did the work *itself* | **833–1128** |
-| Context bloat per session | **250k–370k tokens** → frequent auto-compaction |
-| Parallel fan-outs | **0** |
+| Delegation rate | **1–2% only** |
+| Actions it did itself | **833–1,128 times** |
+| Context bloat per session | **250k–370k tokens** → constant auto-compaction |
+| Parallel sub-agent dispatches | **0** |
 
-> *"I literally said in my system prompt to dispatch sub-agents. But when actually running tasks, the main session just keeps reading files and editing code — it always forgets to use sub-agents."*
+Three previous fixes were tried. All failed:
 
-**Three prior approaches all failed:**
+- **Hard blocks** (intercept the tool) → got routed around via "read in chunks," then reverted
+- **Soft reminders** (nudge plugins) → 43 reminders sent, zero behavior change
+- **Fixed-line-count rules** → misfired on the very instruction files Claude *should* read itself
 
-- 🚧 **Hard gates** (block the tool) → got bypassed by a "read-in-chunks" backdoor, then reverted.
-- 🔕 **Soft reminders** (nudge plugin) → 43 reminders, *zero* behavior change.
-- 📏 **Pure protocol with fixed line-count rules** → mis-fired on the very instruction files the orchestrator *should* read itself.
+The root cause: soft prompts get diluted in long contexts, and hard blocks just cause "try → blocked → route around" — the waste already happened the moment the thought formed.
 
-Root cause, in two parts: **soft prompts get diluted by attention in long contexts**, and **hard blocks cause "try → blocked → route around" — double the wasted time and tokens.**
-
-So this plugin takes the one road none of them took: **don't intercept at all. Change the default instinct.**
+**This plugin takes the only road none of them tried: don't intercept at all. Change the default instinct.**
 
 ---
 
 ## What it does
 
-Install it, and your main session adopts a **foreman mindset**: the heavy, dirty, read-intensive, parallelizable work gets dispatched to a crew of specialist workers — the orchestrator only scopes the task, collects summaries, and judges results. Its own context stays light and clear.
+Install it, and your main Claude Code session adopts a **foreman mindset**: heavy reads, parallel tasks, and implementation work get dispatched to a crew of specialist sub-agents. The main session only scopes the work, collects summaries, and judges results. Its context stays light.
 
 ```
         BEFORE                                  AFTER
 ┌─────────────────────────┐         ┌─────────────────────────┐
-│  ORCHESTRATOR            │         │  ORCHESTRATOR (foreman)  │
+│  Main session            │         │  Main session (foreman)  │
 │  ├─ Read 30k-line file   │         │  ├─ reads light state    │
 │  ├─ grep × 127           │         │  └─ dispatches ↓         │
 │  ├─ git show × 219       │         └──────────┬──────────────┘
 │  ├─ Edit × 13            │            ┌────────┼────────┐
 │  └─ context: 370k 💥     │         file-reader  impl   reviewer
-│     (compaction loop)    │         (heavy reads happen in
-└─────────────────────────┘          workers; only summaries
-   does everything itself              return — context stays light)
+│     (compaction loop)    │         (heavy reads happen in workers;
+└─────────────────────────┘          only summaries return)
 ```
 
-<sub>The "before" numbers above are from one real session: 127 source greps + 219 `git show/diff` + 13 self-edits, a 25.6 : 1 self-to-delegate ratio.</sub>
+---
 
-### The crew (6 portable workers + 1 foreman)
+## The crew
 
-Each worker carries a `description` of *"dispatch me when…"* — the orchestrator routes by reading those descriptions, **never a hardcoded assignment table**. Add a new worker, write its description, and routing grows on its own.
+6 specialist workers + 1 foreman. The main session reads each worker's `description` to decide who to dispatch — no hardcoded assignment table. Add a new worker, write its description, routing grows on its own.
 
 | Worker | Dispatch when you need to… |
 |---|---|
-| 🔎 `researcher` | gather external docs, API references, multi-source fact-checking |
-| 📖 `file-reader` | read large files / long logs too heavy for the main context |
-| 🛠️ `implementer` | write new code (TDD-disciplined, YAGNI-aware) |
-| 🔬 `reviewer` | independently review a deliverable before it's accepted |
-| ✅ `qa` | run tests, verify acceptance, collect falsifiable evidence |
-| 🩹 `fixer` | reproduce → root-cause → patch a finding or failure |
+| 🔎 `researcher` | look up docs, API refs, multi-source fact-checking |
+| 📖 `file-reader` | read large files or long logs — too heavy for the main context |
+| 🛠️ `implementer` | write new code or modify files |
+| 🔬 `reviewer` | independently review a deliverable before accepting it |
+| ✅ `qa` | run tests, verify acceptance, collect evidence |
+| 🩹 `fixer` | reproduce → root-cause → patch a finding or test failure |
 | 🦺 `coordinator` | the foreman itself — full tools, dispatches the crew |
 
 ---
 
-## 60-second quick start
+## Quick start
 
-**1. Install** — drop `Worker-Mode-for-Claude-Code/` into your project's plugin location.
+**1. Install** — drop `Worker-Mode-for-Claude-Code/` into your project's plugin directory.
 
-**2. Configure the one required setting** (like setting an API key):
+**2. Set the one required env var:**
 
 ```bash
 export WORKER_LOG_PATH=/abs/path/to/worker-log.jsonl
 ```
 
-> This is the single external contract. No `WORKER_LOG_PATH`, no recording — and the plugin tells you loudly instead of silently writing to the wrong place. (It still **never blocks your session**.)
+Missing this? The plugin tells you loudly instead of silently writing somewhere wrong. It never blocks your session.
 
-**3. Wire the agents in** (one-time, idempotent):
+**3. Wire the agents in (one-time):**
 
 ```bash
-bash .specify/scripts/bash/setup-delegation-workers.sh
+bash scripts/setup-delegation-workers.sh
 ```
 
-**4. Just use Claude Code normally.** The main session delegates on its own; every worker's run is recorded automatically on `SubagentStop`. You do nothing extra.
+**4. Use Claude Code normally.** The main session delegates on its own. Every sub-agent run is recorded automatically on `SubagentStop`. Nothing extra needed.
 
 ---
 
-## See whether it's actually working
+## Check if it's working
 
-Two complementary post-hoc CLIs — **one-shot, never resident, zero overhead during tasks.**
+Two post-hoc CLIs — one-shot, never resident, zero overhead during tasks.
 
 ```bash
 # What got delegated (reads the worker-log)
 node tools/check-metrics.mjs --log $WORKER_LOG_PATH
-node tools/check-metrics.mjs --log $WORKER_LOG_PATH --json
 
-# What the foreman carried itself that it should have handed off (reads its transcript)
-node tools/check-context-health.mjs <orchestrator-transcript.jsonl>
+# What the foreman carried itself that it should have dispatched
+node tools/check-context-health.mjs <transcript.jsonl>
 ```
 
-`check-metrics` looks at **what went out**. `check-context-health` looks at **what stayed in — the reads the foreman did itself that it could have delegated.** Together they tell the full story.
-
-**The metrics it reports** (all *advisory observation only* — never gates, never thresholds to game):
-
-- **Delegation rate** — dispatches ÷ total orchestrator actions.
-- **Context** — split into two honest numbers, never a single misleading delta:
-  - **net growth** (last − first; JSON key `context_net_growth`) — **can be negative**, and that's a *good* signal: cache compression shrank the context, meaning delegation worked.
-  - **peak** (max − first; JSON key `context_peak`) — the heaviest expansion pressure during the session, always ≥ 0.
-- **Orchestrator vs worker tokens** — the ideal shape is heavy reads pressed onto workers, foreman stays light.
-
-> Why advisory-only? Metrics-as-gates breed score-gaming and bad behavior. The single source of trust is *re-run + signature*, not a number you can inflate.
+`check-metrics` shows what went **out**. `check-context-health` shows what **stayed in** — reads the foreman did itself that it could have delegated. Together they tell the full story.
 
 ---
 
-## Why "pure incentive, zero interception"?
+## Why "zero interception"?
 
-This is the **soul** of the design (decision D1), and it's deliberate:
+Any "discover-it-won't-work-after-the-fact" block makes the model **try → get blocked → route around** — and the waste already happened the moment the thought formed.
 
-> *"I want the orchestrator to genuinely **want** to delegate. I don't want to enforce it with any after-the-fact hard blocking."*
-
-Any "discover-it-won't-work-after-the-fact" block makes the model **try → get blocked → route around** — and the waste already happened the moment the thought formed. So there is **no PreToolUse block, no tool allowlist, no runtime gate, ever.** Whether and when to delegate is 100% the orchestrator's own judgment.
-
-**Red lines — work the foreman must always do itself, never delegate:**
-
-1. Reading execution playbooks (stage definitions, contracts, hard rules, the file under review) — *lossy summaries dispatched to a worker are the #1 source of step-drift.*
-2. Reading progress / state files — the basis for its scheduling judgment.
-3. Judgments that need the current conversation context.
-4. Distilling lessons from the current session.
-
-> ⚙️ **Two hooks, both non-intercepting:** `SessionStart` surfaces a *non-blocking* reminder if `WORKER_LOG_PATH` is missing; `SubagentStop` records one log entry *after* each worker finishes. Neither ever changes or blocks behavior — recording is a pure observer (FR-LOG-006).
-
----
-
-## Fully portable
-
-Zero dependency on any host platform. No task-dir concept, no platform-specific state, no external gates. Pure Node ESM (no npm deps), standard Claude Code hooks + agents + one env var. Drop the folder into any project, set `WORKER_LOG_PATH`, wire the agents — done.
+So there is **no PreToolUse block, no tool allowlist, no runtime gate, ever.** Whether and when to delegate is 100% the foreman's own judgment. The plugin changes the *default instinct*, not the rules.
 
 ---
 
 ## When to skip it
 
-Honesty builds trust, so: this plugin earns its keep on **long, multi-step development sessions** where context bloat and model-cost waste are real. For a quick one-off question, a single small edit, or a throwaway script, the foreman ceremony isn't worth it — just work directly. The plugin won't stop you either way; that's the whole point.
-
----
-
-## Components
-
-| Component | Path | Role |
-|---|---|---|
-| Foreman protocol | `CLAUDE.md` | injects the foreman identity + delegation judgment principles |
-| Foreman agent | `agents/coordinator.md` | the authoritative foreman identity (full tools) |
-| Worker crew | `agents/` (6) | research / read / implement / review / QA / fix |
-| Compaction anchor | `settings-compact.json` | restates the foreman anchor verbatim on auto-compaction |
-| Recorder | `hooks/record-worker.mjs` | SubagentStop hook, appends one delegation record |
-| Config reminder | `hooks/check-config.mjs` | SessionStart non-blocking reminder |
-| State template | `templates/project-state.md` | a light state file workers self-serve context from |
-| Metrics CLI | `tools/check-metrics.mjs` | post-hoc delegation metrics from the worker-log |
-| Context-health CLI | `tools/check-context-health.mjs` | post-hoc: what the foreman carried that it should have delegated |
+This earns its keep on **long, multi-step sessions** where context bloat and token cost are real problems. For a quick one-off question or a single small edit, the foreman setup isn't worth it — just work directly. The plugin won't stop you either way.
 
 ---
 
