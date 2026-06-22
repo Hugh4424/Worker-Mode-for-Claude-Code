@@ -1,7 +1,7 @@
 {
   "name": "Worker-Mode-for-Claude-Code",
   "version": "0.1.0",
-  "description": "orchestrator delegation-judgment plugin: pure-incentive, helps the main session delegate to subagents and record delegation metrics",
+  "description": "Worker Mode for Claude Code: pure-incentive foreman identity protocol that shifts the main session's default instinct from doing to delegating, with worker agents, delegation hooks, and observability tools.",
   "author": {
     "name": "AgentHub"
   },

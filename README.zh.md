@@ -2,7 +2,7 @@
 
 # 🦺 Worker Mode for Claude Code
 
-### 让 Claude 别什么都自己干，学会派活。
+### 装一次，永久派活。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
@@ -58,6 +58,32 @@
 │     （反复触发压缩）     │         （重活都在小工那边发生
 └─────────────────────────┘          只有摘要回到主会话）
 ```
+
+---
+
+## 跑出来看看
+
+会话结束后跑 `check-metrics`，看看实际派出去了多少：
+
+```
+$ node tools/check-metrics.mjs --log $WORKER_LOG_PATH
+
+[session abc123]
+  委派率:         5.9%          ← 装之前: 1-2%
+  上下文净增长:   +37,688 tok
+  主会话 token:   24,729
+  小工 token:     9,371         ← 重读量都在小工那边
+  小工时间占比:   75.1%         ← 3/4 的时间是小工在干活
+  并发派发占比:   4.3%
+
+[session def456]
+  委派率:         0.6%          ← 典型的"装之前"数字
+  上下文净增长:   +39,556 tok
+  主会话 token:   945,467       ← 几乎全部压在主会话
+  小工 token:     5,285
+```
+
+0.6% 和 5.9% 的差距，可见、可量、是真的。
 
 ---
 
@@ -128,9 +154,20 @@ node tools/check-context-health.mjs <主会话转录.jsonl>
 
 ---
 
+## 状态文件
+
+`templates/project-state.md` 是一个可填写的项目状态模板，小工靠它获取项目上下文——工头不用每次都重新解释。把它复制到项目根目录，填好占位符，小工按需自取。
+
+---
+
 ## 什么时候不用它
 
-它在**长的、多步的开发会话**里才值回票价——那种上下文膨胀、模型成本是真问题的场景。要是一个快速的一次性问题、一处小改，工头那套仪式不值得，直接干就行。无论哪种它都不会拦你——这正是它的全部要义。
+**以下情况不用装：**
+- 你的会话主要是单文件修改或一次性提问
+- 项目代码总量不超过约 500 行
+- 你没有 Claude Pro/Max 订阅，Opus 成本对你不是真问题
+
+它在**长的、多步的开发会话**里才值回票价——那种上下文膨胀、模型成本是真问题的场景。无论哪种它都不会拦你——但如果上面那些条件符合你，装它只会带来额外负担，没有收益。
 
 ---
 

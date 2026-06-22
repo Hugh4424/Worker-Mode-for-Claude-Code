@@ -2,7 +2,7 @@
 
 # 🦺 Worker Mode for Claude Code
 
-### Stop Claude from doing all the work itself. Make it delegate.
+### Install once, delegate forever.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
@@ -58,6 +58,32 @@ Install it, and your main Claude Code session adopts a **foreman mindset**: heav
 │     (compaction loop)    │         (heavy reads happen in workers;
 └─────────────────────────┘          only summaries return)
 ```
+
+---
+
+## See it in action
+
+Run `check-metrics` after a session to see what actually got delegated:
+
+```
+$ node tools/check-metrics.mjs --log $WORKER_LOG_PATH
+
+[session abc123]
+  delegation rate:       5.9%          ← before: 1-2%
+  context net growth:    +37,688 tok
+  orchestrator tokens:   24,729
+  worker tokens:         9,371         ← heavy reads happened in workers
+  worker time ratio:     75.1%         ← 3/4 of elapsed time was worker time
+  concurrent dispatches: 4.3%
+
+[session def456]
+  delegation rate:       0.6%          ← typical "before" number
+  context net growth:    +39,556 tok
+  orchestrator tokens:   945,467       ← almost everything in main session
+  worker tokens:         5,285
+```
+
+The gap between a 0.6% and 5.9% delegation rate is visible, measurable, and real.
 
 ---
 
@@ -128,9 +154,20 @@ So there is **no PreToolUse block, no tool allowlist, no runtime gate, ever.** W
 
 ---
 
+## State file
+
+`templates/project-state.md` is a fillable template that workers use to receive project context without the foreman having to re-explain everything each time. Copy it into your project root, fill in the blanks — workers self-fetch it on demand.
+
+---
+
 ## When to skip it
 
-This earns its keep on **long, multi-step sessions** where context bloat and token cost are real problems. For a quick one-off question or a single small edit, the foreman setup isn't worth it — just work directly. The plugin won't stop you either way.
+**Don't install if:**
+- Your sessions are mostly single-file edits or one-shot questions
+- Your project is under ~500 lines total
+- You're not on a Claude Pro/Max plan where Opus cost actually matters
+
+This earns its keep on **long, multi-step sessions** where context bloat and token cost are real. The plugin won't stop you either way — but if the above applies, it's overhead with no payoff.
 
 ---
 
