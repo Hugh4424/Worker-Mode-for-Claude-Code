@@ -1,0 +1,28 @@
+{
+  "description": "Post-hoc delegation logging plugin — appends one record per worker subagent to a unified JSONL log after each SubagentStop event. Pure observer: no interception, no behavior change, no blocking (FR-LOG-006). Workers run and finish normally; this hook only records what happened. A SessionStart hook surfaces a non-blocking reminder (via additionalContext) if the mandatory WORKER_LOG_PATH is unset or non-absolute (FR-PKG-002); it never blocks the session. The actual fail-loud hard stop lives in record-worker.mjs, before writing a record.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/check-config.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/record-worker.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

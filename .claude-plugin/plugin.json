@@ -1,0 +1,25 @@
+{
+  "name": "Worker-Mode-for-Claude-Code",
+  "version": "0.1.0",
+  "description": "orchestrator delegation-judgment plugin: pure-incentive, helps the main session delegate to subagents and record delegation metrics",
+  "author": {
+    "name": "AgentHub"
+  },
+  "components": {
+    "orchestratorProtocol": "CLAUDE.md",
+    "coordinator": "agents/coordinator.md",
+    "workers": "agents/",
+    "subagentLogHook": "hooks/hooks.json",
+    "recordScript": "hooks/record-worker.mjs",
+    "stateTemplate": "templates/project-state.md",
+    "checkTool": "tools/check-metrics.mjs",
+    "contextHealthTool": "tools/check-context-health.mjs"
+  },
+  "config": {
+    "workerLogPath": {
+      "required": true,
+      "env": "WORKER_LOG_PATH",
+      "description": "Absolute path to the unified delegation worker-log jsonl file. plugin.json has no native required-config mechanism, so this requirement is enforced at runtime in two non-conflicting layers: the SessionStart hook (hooks/check-config.mjs) surfaces a NON-BLOCKING reminder via additionalContext if WORKER_LOG_PATH is unset or non-absolute (never blocks the session, preserving the plugin's zero-interception basis), and record-worker.mjs hard-fails before writing a record if it is unset or non-absolute. This field documents the contract; the live value is read from the WORKER_LOG_PATH environment variable."
+    }
+  }
+}
