@@ -1,0 +1,34 @@
+Delegation metrics (3 session(s))
+
+[session 5efb3e83-5e4a-472c-8993-775ce71dd429]
+  delegation rate (委派率): 0.054945054945054944  = records / orchestrator action count
+  context net growth (上下文净增长): -30647  = last - first（负值=上下文净收缩=委派有效）
+  context peak (上下文峰值压力): 37688  = max - first（恒≥0,峰值相对起点的最大扩张）
+  orchestrator vs worker token: orchestrator=37811 worker=9490
+  worker_token_ratio (小工 token 占比): 0.20063000782224477
+  context_inflation_rate (上下文膨胀率, tokens/hour): -101429.00745393235  [denominator: worker-log-fallback]
+  worker_time_ratio (小工时间占比): 0.4958335938103311
+  concurrent_worker_time_ratio (并发小工时间占比): 0.03379606826777417
+  dispatch_summary_cost (每次派发 [输入, 摘要] token): [in=52425 summary=N/A] [in=77442 summary=N/A] [in=95187 summary=N/A] [in=95187 summary=N/A] [in=109236 summary=N/A]
+
+[session 9dd10e14-ae77-4eb2-a5f2-b0bce6eb3b39]
+  delegation rate (委派率): 0.008086253369272238  = records / orchestrator action count
+  context net growth (上下文净增长): 72633  = last - first（负值=上下文净收缩=委派有效）
+  context peak (上下文峰值压力): 72633  = max - first（恒≥0,峰值相对起点的最大扩张）
+  orchestrator vs worker token: orchestrator=968933 worker=9792
+  worker_token_ratio (小工 token 占比): 0.010004853252956653
+  context_inflation_rate (上下文膨胀率, tokens/hour): 201609.14878573647  [denominator: worker-log-fallback]
+  worker_time_ratio (小工时间占比): 0.389091713770443
+  concurrent_worker_time_ratio (并发小工时间占比): 0
+  dispatch_summary_cost (每次派发 [输入, 摘要] token): [in=151709 summary=N/A] [in=157694 summary=N/A] [in=179378 summary=N/A] [in=188329 summary=N/A] [in=218024 summary=N/A] [in=221404 summary=N/A]
+
+[session 35014863-3b75-41b6-b477-073ec2fe894a]
+  delegation rate (委派率): 0.017964071856287425  = records / orchestrator action count
+  context net growth (上下文净增长): 29553  = last - first（负值=上下文净收缩=委派有效）
+  context peak (上下文峰值压力): 29553  = max - first（恒≥0,峰值相对起点的最大扩张）
+  orchestrator vs worker token: orchestrator=134763 worker=8192
+  worker_token_ratio (小工 token 占比): 0.05730474624881956
+  context_inflation_rate (上下文膨胀率, tokens/hour): 563603.1339891613  [denominator: worker-log-fallback]
+  worker_time_ratio (小工时间占比): 1
+  concurrent_worker_time_ratio (并发小工时间占比): 0.10708253229244083
+  dispatch_summary_cost (每次派发 [输入, 摘要] token): [in=202346 summary=N/A] [in=202346 summary=N/A] [in=231850 summary=N/A]
