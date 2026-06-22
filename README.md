@@ -68,29 +68,26 @@ Install it, and your main Claude Code session adopts a **foreman mindset**: heav
 Run `check-metrics` after a session to see what actually got delegated:
 
 ```
-$ node tools/check-metrics.mjs --log $WORKER_LOG_PATH
+$ node tools/check-metrics.mjs --log ~/.claude/worker-log.jsonl
 
-Delegation metrics (3 sessions)
+Delegation metrics (18 sessions)
 
-[session 1]  ← with plugin, delegation working
-  delegation rate:       5.5%
-  context net growth:    -30,647 tok   ← negative = context actually shrank
-  context peak:          +37,688 tok
-  orchestrator tokens:   37,811
-  worker tokens:         9,490         ← heavy reads happened in workers
-  worker time ratio:     49.6%
-  concurrent dispatches: 3.4%
+[best session]  ← with plugin, well-configured
+  delegation rate:       27.6%
+  worker tokens:         1,069,757 tok (74% of total)  ← heavy work in workers
+  orchestrator tokens:   375,877 tok   (26%)
+  context net growth:    +3,316 tok    ← barely moved
+  worker time ratio:     82%
 
-[session 2]  ← without plugin (typical before)
-  delegation rate:       0.8%
-  context net growth:    +72,633 tok   ← ballooning
-  orchestrator tokens:   968,933       ← almost everything in main session
-  worker tokens:         9,792
-  worker time ratio:     38.9%
-  concurrent dispatches: 0%
+[typical session]  ← without plugin
+  delegation rate:       0.9%
+  worker tokens:         12,972 tok    (1% of total)
+  orchestrator tokens:   982,699 tok   (99%)  ← everything in main context
+  context net growth:    +87,972 tok   ← ballooning
+  worker time ratio:     37%
 ```
 
-The negative context growth in session 1 is real: effective delegation lets the context actually shrink via compaction. Full output saved in [`assets/demo-output.txt`](assets/demo-output.txt).
+Full output saved in [`assets/demo-output.txt`](assets/demo-output.txt).
 
 ---
 

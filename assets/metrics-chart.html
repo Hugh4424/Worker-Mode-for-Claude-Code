@@ -2,7 +2,6 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Worker Mode — Delegation Metrics</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -10,269 +9,234 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     background: #0d1117;
     color: #e6edf3;
-    padding: 32px;
-    min-width: 760px;
+    padding: 36px 40px 32px;
+    width: 960px;
   }
-  .header {
-    margin-bottom: 28px;
+  h1 { font-size: 19px; font-weight: 700; color: #f0f6fc; margin-bottom: 4px; }
+  .subtitle { font-size: 12px; color: #6e7681; margin-bottom: 28px; }
+
+  .section-label {
+    font-size: 10px; font-weight: 700; letter-spacing: .08em;
+    text-transform: uppercase; color: #8b949e; margin-bottom: 14px;
   }
-  .header h1 {
-    font-size: 20px;
-    font-weight: 600;
-    color: #f0f6fc;
-    margin-bottom: 4px;
+
+  /* ── 2-col layout ── */
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+  .col {
+    background: #161b22; border: 1px solid #30363d;
+    border-radius: 10px; padding: 20px 22px;
   }
-  .header p {
-    font-size: 13px;
-    color: #8b949e;
+  .col-title {
+    font-size: 13px; font-weight: 600; margin-bottom: 16px;
+    display: flex; align-items: center; gap: 8px;
   }
-  .grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
-    margin-bottom: 20px;
+  .badge {
+    font-size: 10px; font-weight: 700; padding: 2px 8px;
+    border-radius: 20px; letter-spacing: .04em;
   }
-  .card {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 20px;
+  .b-before { background:#3a1212; color:#f85149; border:1px solid #da3633; }
+  .b-after  { background:#0f2d16; color:#3fb950; border:1px solid #238636; }
+
+  /* ── Donut ── */
+  .donut-wrap { display: flex; align-items: center; gap: 18px; margin-bottom: 16px; }
+  .donut { position: relative; width: 110px; height: 110px; flex-shrink: 0; }
+  .donut svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .donut-label {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    font-size: 11px; color: #8b949e; text-align: center; line-height: 1.4;
   }
-  .card-title {
-    font-size: 12px;
-    color: #8b949e;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 16px;
+  .donut-pct { font-size: 22px; font-weight: 800; line-height: 1.1; }
+  .legend { display: flex; flex-direction: column; gap: 9px; }
+  .leg-row { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #c9d1d9; }
+  .leg-dot { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; }
+
+  /* ── KPI row ── */
+  .kpi-row { display: flex; gap: 10px; margin-top: 14px; }
+  .kpi {
+    flex: 1; background: #0d1117; border: 1px solid #21262d;
+    border-radius: 7px; padding: 10px 12px; text-align: center;
   }
-  /* Bar chart */
-  .bar-group {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .bar-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-  }
-  .bar-label {
-    font-size: 12px;
-    color: #8b949e;
-    width: 72px;
-    flex-shrink: 0;
-    text-align: right;
-  }
+  .kpi-val { font-size: 22px; font-weight: 800; }
+  .kpi-lbl { font-size: 10px; color: #6e7681; margin-top: 3px; }
+  .green  { color: #3fb950; }
+  .red    { color: #f85149; }
+  .blue   { color: #58a6ff; }
+
+  /* ── Time bar ── */
+  .bar-lbl { font-size: 11px; color: #8b949e; margin-bottom: 5px; }
   .bar-track {
-    flex: 1;
-    background: #21262d;
-    border-radius: 3px;
-    height: 20px;
-    position: relative;
-    overflow: hidden;
+    height: 30px; background: #21262d; border-radius: 5px;
+    overflow: hidden; display: flex;
   }
-  .bar-fill {
-    height: 100%;
-    border-radius: 3px;
-    transition: width 0.3s ease;
-    display: flex;
-    align-items: center;
-    padding-left: 6px;
+  .seg {
+    height: 100%; display: flex; align-items: center;
+    justify-content: center; font-size: 11px; font-weight: 700;
   }
-  .bar-value {
-    font-size: 11px;
-    font-weight: 600;
+  .seg-orch   { background: #1f6feb; color: #fff; }
+  .seg-worker { background: #238636; color: #fff; }
+
+  /* ── Comparison bars ── */
+  .divider { border: none; border-top: 1px solid #21262d; margin: 20px 0; }
+  .cmp-row { display: flex; align-items: center; gap: 12px; margin-bottom: 11px; }
+  .cmp-lbl { font-size: 12px; width: 120px; flex-shrink: 0; color: #8b949e; }
+  .cmp-track {
+    flex: 1; height: 26px; background: #21262d;
+    border-radius: 4px; overflow: hidden; display: flex; align-items: stretch;
+  }
+  .cmp-fill {
+    display: flex; align-items: center; padding: 0 10px;
+    font-size: 11px; font-weight: 700; color: #fff; border-radius: 4px;
     white-space: nowrap;
-  }
-  .green  { background: #238636; }
-  .blue   { background: #1f6feb; }
-  .orange { background: #d29922; }
-  .red    { background: #da3633; }
-  .muted  { background: #30363d; }
-
-  /* Stat cards row */
-  .stat-row {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 12px;
-    margin-bottom: 20px;
-  }
-  .stat-card {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 16px;
-    text-align: center;
-  }
-  .stat-value {
-    font-size: 26px;
-    font-weight: 700;
-    margin-bottom: 4px;
-  }
-  .stat-label {
-    font-size: 12px;
-    color: #8b949e;
-  }
-  .positive { color: #3fb950; }
-  .negative { color: #da3633; }
-  .neutral  { color: #58a6ff; }
-
-  /* Context growth special card */
-  .context-note {
-    font-size: 11px;
-    color: #3fb950;
-    margin-top: 6px;
-    font-style: italic;
   }
 
   .footer {
-    font-size: 11px;
-    color: #484f58;
-    margin-top: 8px;
-    border-top: 1px solid #21262d;
-    padding-top: 12px;
-  }
-  .badge {
-    display: inline-block;
-    font-size: 10px;
-    padding: 2px 7px;
-    border-radius: 12px;
-    font-weight: 600;
-    margin-left: 6px;
-  }
-  .badge-with  { background: #1f3a1f; color: #3fb950; border: 1px solid #238636; }
-  .badge-without { background: #3a1f1f; color: #f85149; border: 1px solid #da3633; }
-  .session-title {
-    font-size: 13px;
-    font-weight: 600;
-    color: #e6edf3;
-    margin-bottom: 14px;
+    margin-top: 20px; font-size: 10px; color: #484f58;
+    border-top: 1px solid #21262d; padding-top: 12px;
   }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <h1>🦺 Worker Mode — Delegation Metrics</h1>
-  <p>Real data from 3 sessions tracked by <code>check-metrics</code> · Generated from worker-log.jsonl</p>
+<h1>🦺 Worker Mode for Claude Code — Delegation Metrics</h1>
+<p class="subtitle">Real data · 18 sessions in worker-log · best vs worst case shown</p>
+
+<!-- ══ TOKEN DISTRIBUTION ══ -->
+<div class="section-label">Token Distribution — Who consumed the tokens?</div>
+<div class="cols">
+
+  <!-- WITHOUT -->
+  <div class="col">
+    <div class="col-title">Typical session <span class="badge b-before">WITHOUT PLUGIN</span></div>
+    <div class="donut-wrap">
+      <div class="donut">
+        <svg viewBox="0 0 36 36">
+          <!-- main: 99%, worker: 1% -->
+          <circle cx="18" cy="18" r="15.9" fill="none" stroke="#1f6feb" stroke-width="4"
+            stroke-dasharray="98.7 1.3"/>
+          <circle cx="18" cy="18" r="15.9" fill="none" stroke="#238636" stroke-width="4"
+            stroke-dasharray="1.3 98.7" stroke-dashoffset="-98.7"/>
+        </svg>
+        <div class="donut-label">
+          <span class="donut-pct red">99%</span>
+          <span>main<br>session</span>
+        </div>
+      </div>
+      <div class="legend">
+        <div class="leg-row"><div class="leg-dot" style="background:#1f6feb"></div>Main session: <strong>982,699 tok (99%)</strong></div>
+        <div class="leg-row"><div class="leg-dot" style="background:#238636"></div>Workers: <strong>12,972 tok (1%)</strong></div>
+        <div class="leg-row" style="margin-top:4px;color:#6e7681;font-size:11px">Everything stays in the<br>main (expensive) context</div>
+      </div>
+    </div>
+    <div class="kpi-row">
+      <div class="kpi"><div class="kpi-val red">0.9%</div><div class="kpi-lbl">Delegation rate</div></div>
+      <div class="kpi"><div class="kpi-val red">+87,972</div><div class="kpi-lbl">Context growth (tok)</div></div>
+    </div>
+  </div>
+
+  <!-- WITH -->
+  <div class="col">
+    <div class="col-title">Best session <span class="badge b-after">WITH PLUGIN</span></div>
+    <div class="donut-wrap">
+      <div class="donut">
+        <svg viewBox="0 0 36 36">
+          <!-- main: 26%, worker: 74% -->
+          <circle cx="18" cy="18" r="15.9" fill="none" stroke="#1f6feb" stroke-width="4"
+            stroke-dasharray="26 74"/>
+          <circle cx="18" cy="18" r="15.9" fill="none" stroke="#238636" stroke-width="4"
+            stroke-dasharray="74 26" stroke-dashoffset="-26"/>
+        </svg>
+        <div class="donut-label">
+          <span class="donut-pct green">74%</span>
+          <span>workers</span>
+        </div>
+      </div>
+      <div class="legend">
+        <div class="leg-row"><div class="leg-dot" style="background:#1f6feb"></div>Main session: <strong>375,877 tok (26%)</strong></div>
+        <div class="leg-row"><div class="leg-dot" style="background:#238636"></div>Workers: <strong>1,069,757 tok (74%)</strong></div>
+        <div class="leg-row" style="margin-top:4px;color:#3fb950;font-size:11px">Heavy work offloaded;<br>main context stays light</div>
+      </div>
+    </div>
+    <div class="kpi-row">
+      <div class="kpi"><div class="kpi-val green">27.6%</div><div class="kpi-lbl">Delegation rate</div></div>
+      <div class="kpi"><div class="kpi-val green">+3,316</div><div class="kpi-lbl">Context growth (tok)</div></div>
+    </div>
+  </div>
+
 </div>
 
-<!-- Top stat cards: session 1 (with plugin) vs session 2 (without) -->
-<div class="grid" style="margin-bottom:16px">
+<!-- ══ TIME DISTRIBUTION ══ -->
+<div class="section-label">Time Distribution — How was session time spent?</div>
+<div class="cols">
 
-  <div class="card">
-    <div class="session-title">Session 1 <span class="badge badge-with">with plugin</span></div>
-    <div class="stat-row" style="margin-bottom:0">
-      <div class="stat-card">
-        <div class="stat-value positive">5.5%</div>
-        <div class="stat-label">Delegation rate</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value positive">−30,647</div>
-        <div class="stat-label">Context net growth (tok)</div>
-        <div class="context-note">↑ negative = good</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value neutral">20.1%</div>
-        <div class="stat-label">Worker token share</div>
-      </div>
+  <div class="col">
+    <div class="col-title">Typical session <span class="badge b-before">WITHOUT PLUGIN</span></div>
+    <div class="bar-lbl">Session time breakdown</div>
+    <div class="bar-track">
+      <div class="seg seg-orch"   style="width:63%">63% main session</div>
+      <div class="seg seg-worker" style="width:37%">37% workers</div>
+    </div>
+    <div class="kpi-row">
+      <div class="kpi"><div class="kpi-val red">37%</div><div class="kpi-lbl">Worker time ratio</div></div>
+      <div class="kpi"><div class="kpi-val red">0%</div><div class="kpi-lbl">Concurrent dispatches</div></div>
     </div>
   </div>
 
-  <div class="card">
-    <div class="session-title">Session 2 <span class="badge badge-without">without plugin</span></div>
-    <div class="stat-row" style="margin-bottom:0">
-      <div class="stat-card">
-        <div class="stat-value negative">0.8%</div>
-        <div class="stat-label">Delegation rate</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value negative">+72,633</div>
-        <div class="stat-label">Context net growth (tok)</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-value negative">1.0%</div>
-        <div class="stat-label">Worker token share</div>
-      </div>
+  <div class="col">
+    <div class="col-title">Best session <span class="badge b-after">WITH PLUGIN</span></div>
+    <div class="bar-lbl">Session time breakdown</div>
+    <div class="bar-track">
+      <div class="seg seg-orch"   style="width:18%">18%</div>
+      <div class="seg seg-worker" style="width:82%">82% worker time</div>
+    </div>
+    <div class="kpi-row">
+      <div class="kpi"><div class="kpi-val green">82%</div><div class="kpi-lbl">Worker time ratio</div></div>
+      <div class="kpi"><div class="kpi-val green">27.6%</div><div class="kpi-lbl">Delegation rate</div></div>
     </div>
   </div>
 
 </div>
 
-<!-- Bar charts side by side -->
-<div class="grid">
+<!-- ══ DELEGATION RATE ACROSS ALL SESSIONS ══ -->
+<hr class="divider">
+<div class="section-label">Delegation Rate — Spread across all 18 sessions</div>
 
-  <div class="card">
-    <div class="card-title">Delegation rate — all 3 sessions</div>
-    <div class="bar-group">
-      <div class="bar-row">
-        <div class="bar-label">Session 1</div>
-        <div class="bar-track">
-          <div class="bar-fill green" style="width:55%">
-            <span class="bar-value" style="color:#fff">5.5%</span>
-          </div>
-        </div>
-      </div>
-      <div class="bar-row">
-        <div class="bar-label">Session 2</div>
-        <div class="bar-track">
-          <div class="bar-fill red" style="width:8%">
-            <span class="bar-value" style="color:#fff">0.8%</span>
-          </div>
-        </div>
-      </div>
-      <div class="bar-row">
-        <div class="bar-label">Session 3</div>
-        <div class="bar-track">
-          <div class="bar-fill orange" style="width:18%">
-            <span class="bar-value" style="color:#fff">1.8%</span>
-          </div>
-        </div>
-      </div>
+<div class="cmp-row">
+  <div class="cmp-lbl" style="color:#3fb950">Best &nbsp;27.6%</div>
+  <div class="cmp-track">
+    <div class="cmp-fill" style="width:100%; background:linear-gradient(90deg,#238636,#2ea043)">
+      27.6% — 74% of tokens in workers · 82% of time in workers
     </div>
   </div>
-
-  <div class="card">
-    <div class="card-title">Orchestrator vs Worker tokens</div>
-    <div class="bar-group">
-      <div class="bar-row">
-        <div class="bar-label" style="font-size:11px">S1 workers</div>
-        <div class="bar-track">
-          <div class="bar-fill green" style="width:20%">
-            <span class="bar-value" style="color:#fff">20%</span>
-          </div>
-        </div>
-      </div>
-      <div class="bar-row">
-        <div class="bar-label" style="font-size:11px">S1 orch.</div>
-        <div class="bar-track">
-          <div class="bar-fill muted" style="width:80%">
-            <span class="bar-value" style="color:#aaa">80%</span>
-          </div>
-        </div>
-      </div>
-      <div class="bar-row">
-        <div class="bar-label" style="font-size:11px">S2 workers</div>
-        <div class="bar-track">
-          <div class="bar-fill red" style="width:1%">
-          </div>
-        </div>
-      </div>
-      <div class="bar-row">
-        <div class="bar-label" style="font-size:11px">S2 orch.</div>
-        <div class="bar-track">
-          <div class="bar-fill muted" style="width:99%">
-            <span class="bar-value" style="color:#aaa">99%</span>
-          </div>
-        </div>
-      </div>
+</div>
+<div class="cmp-row">
+  <div class="cmp-lbl" style="color:#3fb950">2nd &nbsp;&nbsp;31.4%*</div>
+  <div class="cmp-track">
+    <div class="cmp-fill" style="width:100%; background:linear-gradient(90deg,#1a7f37,#238636)">
+      31.4% — 73.5% of tokens in workers · 70% of time in workers
     </div>
   </div>
+</div>
+<div class="cmp-row">
+  <div class="cmp-lbl" style="color:#d29922">Mid &nbsp;&nbsp;14%</div>
+  <div class="cmp-track">
+    <div class="cmp-fill" style="width:51%; background:#d29922">14% delegation</div>
+  </div>
+</div>
+<div class="cmp-row">
+  <div class="cmp-lbl" style="color:#f85149">Typical 0.9%</div>
+  <div class="cmp-track">
+    <div class="cmp-fill" style="width:4%; background:#da3633; min-width:36px">0.9%</div>
+  </div>
+</div>
 
+<div style="font-size:11px;color:#484f58;margin-top:8px">
+  * delegation rate counts dispatches ÷ total orchestrator actions; higher = more work handed off
 </div>
 
 <div class="footer">
-  Worker Mode for Claude Code · github.com/Hugh4424/Worker-Mode-for-Claude-Code · Data source: worker-log.jsonl
+  Worker Mode for Claude Code · github.com/Hugh4424/Worker-Mode-for-Claude-Code · Source: ~/.claude/worker-log.jsonl (18 real sessions)
 </div>
 
 </body>

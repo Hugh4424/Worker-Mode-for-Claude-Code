@@ -68,29 +68,26 @@
 会话结束后跑 `check-metrics`，看看实际派出去了多少：
 
 ```
-$ node tools/check-metrics.mjs --log $WORKER_LOG_PATH
+$ node tools/check-metrics.mjs --log ~/.claude/worker-log.jsonl
 
-Delegation metrics（3 个会话）
+Delegation metrics（18 个会话）
 
-[会话 1]  ← 装了插件，委派有效
-  委派率:         5.5%
-  上下文净增长:   -30,647 tok   ← 负数 = 上下文实际净收缩了
-  上下文峰值压力: +37,688 tok
-  主会话 token:   37,811
-  小工 token:     9,490         ← 重读量都在小工那边
-  小工时间占比:   49.6%
-  并发派发占比:   3.4%
+[最佳会话]  ← 装了插件，委派充分
+  委派率:         27.6%
+  小工 token:     1,069,757 tok（占总量 74%）← 重活都在小工那边
+  主会话 token:   375,877 tok（26%）
+  上下文净增长:   +3,316 tok  ← 几乎没有膨胀
+  小工时间占比:   82%
 
-[会话 2]  ← 装之前（典型数字）
-  委派率:         0.8%
-  上下文净增长:   +72,633 tok   ← 持续膨胀
-  主会话 token:   968,933       ← 几乎全部压在主会话
-  小工 token:     9,792
-  小工时间占比:   38.9%
-  并发派发占比:   0%
+[典型会话]  ← 未装插件
+  委派率:         0.9%
+  小工 token:     12,972 tok（占总量 1%）
+  主会话 token:   982,699 tok（99%）← 全部压在主会话
+  上下文净增长:   +87,972 tok ← 持续膨胀
+  小工时间占比:   37%
 ```
 
-会话 1 的上下文净增长是负数，这是真实数据：有效委派让上下文通过压缩实际收缩了。完整输出见 [`assets/demo-output.txt`](assets/demo-output.txt)。
+完整输出见 [`assets/demo-output.txt`](assets/demo-output.txt)。
 
 ---
 
