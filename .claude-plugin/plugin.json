@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Worker Mode for Claude Code: pure-incentive foreman identity protocol that shifts the main session's default instinct from doing to delegating, with worker agents, delegation hooks, and observability tools.",
   "author": {
-    "name": "AgentHub"
+    "name": "Hugh4424"
   },
   "components": {
     "orchestratorProtocol": "CLAUDE.md",

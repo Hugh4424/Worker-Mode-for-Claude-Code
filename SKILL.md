@@ -15,8 +15,6 @@ triggers:
   - "turn on foreman"
 platforms:
   - claude-code
-  - codex
-  - opencode
 ---
 
 # Worker Mode

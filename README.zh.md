@@ -68,22 +68,24 @@
 ```
 $ node tools/check-metrics.mjs --log $WORKER_LOG_PATH
 
-[session abc123]
-  委派率:         5.9%          ← 装之前: 1-2%
+[session abc123]  ← 装了插件之后
+  委派率:         5.9%
   上下文净增长:   +37,688 tok
   主会话 token:   24,729
   小工 token:     9,371         ← 重读量都在小工那边
   小工时间占比:   75.1%         ← 3/4 的时间是小工在干活
   并发派发占比:   4.3%
 
-[session def456]
-  委派率:         0.6%          ← 典型的"装之前"数字
+[session def456]  ← 装之前（典型数字）
+  委派率:         0.6%
   上下文净增长:   +39,556 tok
   主会话 token:   945,467       ← 几乎全部压在主会话
   小工 token:     5,285
+  小工时间占比:   N/A
+  并发派发占比:   N/A
 ```
 
-0.6% 和 5.9% 的差距，可见、可量、是真的。
+同一个项目，装插件前后。差距可见、可量、是真的。
 
 ---
 
@@ -117,7 +119,7 @@ git clone https://github.com/Hugh4424/Worker-Mode-for-Claude-Code ~/.claude/Work
 export WORKER_LOG_PATH=/abs/path/to/worker-log.jsonl
 ```
 
-没配？插件会明确告诉你，不会偷偷写到错误的地方。但它**永远不会阻断你的会话**。
+把这行加进 `~/.zshrc`（或 `~/.bashrc`），否则重开终端就失效了。没配？插件会明确告诉你，不会偷偷写到错误的地方。但它**永远不会阻断你的会话**。
 
 **3. 把 agent 接进项目（一次性）：**
 

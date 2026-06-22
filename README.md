@@ -68,22 +68,24 @@ Run `check-metrics` after a session to see what actually got delegated:
 ```
 $ node tools/check-metrics.mjs --log $WORKER_LOG_PATH
 
-[session abc123]
-  delegation rate:       5.9%          ← before: 1-2%
+[session abc123]  ← with plugin
+  delegation rate:       5.9%
   context net growth:    +37,688 tok
   orchestrator tokens:   24,729
   worker tokens:         9,371         ← heavy reads happened in workers
   worker time ratio:     75.1%         ← 3/4 of elapsed time was worker time
   concurrent dispatches: 4.3%
 
-[session def456]
-  delegation rate:       0.6%          ← typical "before" number
+[session def456]  ← without plugin (typical before)
+  delegation rate:       0.6%
   context net growth:    +39,556 tok
   orchestrator tokens:   945,467       ← almost everything in main session
   worker tokens:         5,285
+  worker time ratio:     N/A
+  concurrent dispatches: N/A
 ```
 
-The gap between a 0.6% and 5.9% delegation rate is visible, measurable, and real.
+Same project. Before and after installing the plugin. The difference is visible, measurable, and real.
 
 ---
 
@@ -117,7 +119,7 @@ git clone https://github.com/Hugh4424/Worker-Mode-for-Claude-Code ~/.claude/Work
 export WORKER_LOG_PATH=/abs/path/to/worker-log.jsonl
 ```
 
-Missing this? The plugin tells you loudly instead of silently writing somewhere wrong. It never blocks your session.
+Add this to your `~/.zshrc` (or `~/.bashrc`) so it persists across terminal sessions. Missing it? The plugin tells you loudly instead of silently writing somewhere wrong. It never blocks your session.
 
 **3. Wire the agents in (one-time):**
 
