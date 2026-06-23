@@ -14,20 +14,19 @@
 //   node check-context-health.mjs <transcript.jsonl> [--json]
 
 import { readFileSync } from "node:fs";
+import {
+  BIG_CHUNK_LINES,
+  BIG_CHUNK_BYTES,
+  COMPACTION_DROP_TOKENS,
+  isBigSelfChunk,
+  aggregateDelegatable,
+} from "./lib/self-work-classifier.mjs";
 
-// ── tunable thresholds (named consts) ───────────────────────────────────────────
-// A Read/Grep/Bash result, or a Write/Edit input, at/above EITHER bound is a "big
-// chunk". The harness's own large_read_intercept fires at 150 lines, so we mirror that
-// for the line bound and add a byte bound for results with few but long lines.
-export const BIG_CHUNK_LINES = 150;
-export const BIG_CHUNK_BYTES = 6000;
-// A turn-to-turn context DROP larger than this marks a compaction event (and a new
-// segment). Context windows are hundreds of k tokens; a real compaction sheds >100k.
-export const COMPACTION_DROP_TOKENS = 100000;
+// Re-export constants so existing importers (tests, other tools) keep working unchanged.
+export { BIG_CHUNK_LINES, BIG_CHUNK_BYTES, COMPACTION_DROP_TOKENS };
 
 // Tools the FOREMAN runs that consume context by reading/writing big chunks itself.
 // Agent/Task are delegation (the opposite of self-work) and are excluded by name.
-const READ_TOOLS = new Set(["Read", "Grep", "Bash"]); // big cost = RESULT size
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit"]); // big cost = INPUT size
 
 // ── jsonl parse (let-it-crash on corruption, skip only blank padding) ────────────
@@ -58,67 +57,33 @@ function isForeman(line) {
   return line && line.isSidechain !== true;
 }
 
-function countLines(s) {
-  // Real line count, not newline count: a 151-line file with NO trailing newline
-  // has only 150 "\n" but is 151 lines. split("\n").length gives 151 — matches the
-  // repo's own large_read_intercept (content.split("\n").length), so the >150 boundary
-  // fires correctly. Empty string is 0 lines (not 1).
-  // ponytail: for multi-block / multi-field content the callers SUM per-piece line
-  // counts, which can over-count by ~1 per extra piece. That only ever makes a read
-  // MORE likely flagged big (never misses), and big-chunk is a tunable heuristic, so
-  // the over-approx is acceptable; tighten only if false-positives matter.
-  return typeof s === "string" && s.length > 0 ? s.split("\n").length : 0;
-}
+// Size helpers (countLines, resultBytes, resultLines, inputBytes, inputLines) and
+// resolveTargetFile live in ./lib/self-work-classifier.mjs. They are not re-exported
+// here because callers who need them should import from the classifier directly.
 
-function resultBytes(content) {
+// ── internal size helpers for tool_result indexing ───────────────────────────────
+// These two are local because they are only used by analyzeContextHealth's step 2 to
+// pre-index result sizes — the classifier's isBigSelfChunk receives pre-computed
+// { bytes, lines } rather than raw content blocks, keeping the hot path simple.
+
+function _resultBytes(content) {
   if (typeof content === "string") return content.length;
   if (Array.isArray(content)) {
-    // content can be an array of {type:"text",text} blocks
     return content.reduce((n, b) => n + (b && typeof b.text === "string" ? b.text.length : 0), 0);
   }
   return 0;
 }
 
-// Line count of a tool_result's content — mirrors resultBytes over the same shapes.
-// A long file of many SHORT lines is a big read even when its byte size is modest.
-function resultLines(content) {
-  if (typeof content === "string") return countLines(content);
+function _countLines(s) {
+  return typeof s === "string" && s.length > 0 ? s.split("\n").length : 0;
+}
+
+function _resultLines(content) {
+  if (typeof content === "string") return _countLines(content);
   if (Array.isArray(content)) {
-    return content.reduce((n, b) => n + (b && typeof b.text === "string" ? countLines(b.text) : 0), 0);
+    return content.reduce((n, b) => n + (b && typeof b.text === "string" ? _countLines(b.text) : 0), 0);
   }
   return 0;
-}
-
-function inputBytes(input) {
-  if (!input || typeof input !== "object") return 0;
-  // Self-write cost lives in the written text, not the tiny tool_result. Sum the
-  // text-bearing fields a Write/Edit carries.
-  let n = 0;
-  for (const k of ["content", "new_string", "old_string"]) {
-    if (typeof input[k] === "string") n += input[k].length;
-  }
-  if (Array.isArray(input.edits)) {
-    for (const e of input.edits) {
-      if (e && typeof e.new_string === "string") n += e.new_string.length;
-    }
-  }
-  return n;
-}
-
-// Line count of a self-write's input — mirrors inputBytes over the same fields, so a
-// long many-short-lines write registers as big even when its byte size is modest.
-function inputLines(input) {
-  if (!input || typeof input !== "object") return 0;
-  let n = 0;
-  for (const k of ["content", "new_string", "old_string"]) {
-    if (typeof input[k] === "string") n += countLines(input[k]);
-  }
-  if (Array.isArray(input.edits)) {
-    for (const e of input.edits) {
-      if (e && typeof e.new_string === "string") n += countLines(e.new_string);
-    }
-  }
-  return n;
 }
 
 // ── core analysis ────────────────────────────────────────────────────────────────
@@ -148,6 +113,8 @@ export function analyzeContextHealth(transcriptPath) {
   }
 
   // 2) Index tool_result by tool_use_id: { bytes, lines, isError } (foreman side only).
+  //    Pre-compute sizes here so step 3 can pass a plain { bytes, lines, isError } object
+  //    to isBigSelfChunk without feeding it raw content blocks.
   const resultsById = new Map();
   for (const line of lines) {
     if (!isForeman(line) || line.type !== "user") continue;
@@ -155,8 +122,8 @@ export function analyzeContextHealth(transcriptPath) {
     for (const block of content) {
       if (block && (block.type === "tool_result") && typeof block.tool_use_id === "string") {
         resultsById.set(block.tool_use_id, {
-          bytes: resultBytes(block.content),
-          lines: resultLines(block.content),
+          bytes: _resultBytes(block.content),
+          lines: _resultLines(block.content),
           isError: block.is_error === true,
         });
       }
@@ -164,49 +131,17 @@ export function analyzeContextHealth(transcriptPath) {
   }
 
   // 3) Classify each foreman tool_use into big self-read/self-write + delegatability.
-  //    delegatable buckets:
-  //      floor  : clearly self-contained — resolvable file, never later mutated, no error.
-  //      ambiguous (ceiling-only): target unresolvable (Grep-over-dir / Bash) → maybe.
-  //      excluded: file IS later mutated, OR result is an error → reactive, not delegatable.
+  //    Attach the pre-indexed result to each toolUse entry so aggregateDelegatable can
+  //    use isBigSelfChunk internally with the same { bytes, lines } data.
   let bigSelfReads = 0;
-  let floor = 0;
-  let ambiguous = 0;
+  const toolUsesWithResults = new Map();
   for (const [id, { name, input }] of toolUses.entries()) {
-    const isRead = READ_TOOLS.has(name);
-    const isWrite = WRITE_TOOLS.has(name);
-    if (!isRead && !isWrite) continue; // Agent/Task/TodoWrite/etc. are not self-read/write
-
-    // A chunk is big if it crosses EITHER bound (matches the lines 18-21 contract):
-    // many short lines is just as costly to read as one fat blob.
-    let big = false;
-    if (isWrite) {
-      // Writes/Edits: size by the input text the foreman authored.
-      big = inputBytes(input) >= BIG_CHUNK_BYTES || inputLines(input) > BIG_CHUNK_LINES;
-    } else {
-      // Reads/Grep/Bash: size by the returned result.
-      const res = resultsById.get(id) || null;
-      const bytes = res ? res.bytes : 0;
-      const lineCount = res ? res.lines : 0;
-      big = bytes >= BIG_CHUNK_BYTES || lineCount > BIG_CHUNK_LINES;
-    }
-    if (!big) continue;
-    bigSelfReads++;
-
-    // delegatable heuristic — reads only (a self-WRITE is never "delegatable"; it is
-    // the foreman mutating, which is its own decision, not an outsourceable read).
-    if (!isRead) continue;
-    const res = resultsById.get(id);
-    if (res && res.isError) continue; // error-driven → reactive → excluded
-    const fp = resolveTargetFile(name, input);
-    if (fp === null) {
-      ambiguous++; // unresolvable target → ceiling only
-    } else if (mutatedFiles.has(fp)) {
-      // file resolved but later mutated → not delegatable (excluded from both)
-    } else {
-      floor++; // resolvable + never mutated + no error → clearly delegatable
-    }
+    const result = resultsById.get(id) || null;
+    toolUsesWithResults.set(id, { name, input, result });
+    const { isBigSelfRead, isBigSelfWrite } = isBigSelfChunk({ toolUse: { name, input }, result });
+    if (isBigSelfRead || isBigSelfWrite) bigSelfReads++;
   }
-  const delegatableRange = [floor, floor + ambiguous];
+  const delegatableRange = aggregateDelegatable({ toolUses: toolUsesWithResults, mutatedFiles });
 
   // 4) Context series: one value per assistant message.id, in file order.
   //    Context size at a turn ≈ input_tokens + cache_read_input_tokens.
