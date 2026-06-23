@@ -1,11 +1,23 @@
 #!/usr/bin/env node
-// record-worker.mjs — SubagentStop hook: appends one 11-field JSON record per worker.
+// record-worker.mjs — SubagentStop hook: appends one JSON record per worker.
 // Post-hoc logging only; no interception, no behavior change (FR-LOG-006).
 // Node ESM, no external dependencies.
+//
+// KNOWN LIMITATION — subagent crash before SubagentStop fires:
+//   When a subagent exits abnormally (API stream timeout, server disconnect, etc.)
+//   Claude Code may not fire SubagentStop at all, so this hook never runs and the
+//   dispatch goes completely unrecorded. This is a fundamental hook-mechanism
+//   constraint that cannot be fixed inside record-worker.mjs.
+//   Root fix requires a complementary SubagentStart hook that pre-creates a
+//   placeholder record (keyed by dispatch_id) which this hook then upserts on
+//   success. That two-hook design is the correct long-term solution; it is NOT
+//   implemented here. When SubagentStop does fire but the transcript is incomplete
+//   (partial crash), this script writes a status=incomplete placeholder instead of
+//   dropping the record entirely (see "incomplete path" below).
 
 import { createRequire } from "node:module";
-import { readFileSync, mkdirSync, appendFileSync, openSync, writeSync, closeSync } from "node:fs";
-import { dirname, isAbsolute } from "node:path";
+import { readFileSync, existsSync, mkdirSync, appendFileSync, openSync, writeSync, closeSync } from "node:fs";
+import { basename, dirname, isAbsolute } from "node:path";
 import { execFileSync } from "node:child_process";
 
 // ── single-run wall-clock guard (FR-REC-004 ②) ────────────────────────────────
@@ -42,12 +54,44 @@ function readJsonlLines(filePath) {
 }
 
 // Hard-dependency failure: print guidance and exit non-zero WITHOUT writing any
-// record, so the worker-log never accumulates fake all-zero metrics that would
-// corrupt the CHK delegation/context/token metrics.
+// record. Used only for infrastructure/config failures (missing paths, unreadable
+// transcripts, timeout exceeded) where even a placeholder would be misleading.
+// For "transcript arrived but metrics incomplete" use writeIncomplete() instead.
 function failHard(reason) {
   process.stderr.write("[record-worker] hard-dependency failure: " + reason + "\n" +
     "Refusing to write a worker-log record with missing metrics. No record appended.\n");
   process.exit(1);
+}
+
+// Soft-dependency failure: transcript arrived (SubagentStop fired) but the data
+// inside is incomplete (subagent crashed mid-run). We write a status=incomplete
+// placeholder with whatever fields we have, so the dispatch is not lost entirely.
+// Callers must provide the partial record object (fields may be null/0/"") and
+// logPath (workerLogPath is available at call site but not here at definition time).
+function writeIncomplete(reason, partialRecord, logPath) {
+  // Same single-run time bound as the normal record path (FR-REC-004 ②):
+  // if we are already over budget, refuse to write anything — even a placeholder.
+  // "over time-limit" is a hard-dependency failure (infrastructure problem),
+  // not a soft one; writeIncomplete is for data-quality issues, not hung runs.
+  const elapsedMs = Date.now() - RUN_START_MS;
+  if (RUN_TIMEOUT_MS === 0 || elapsedMs > RUN_TIMEOUT_MS) {
+    failHard("single-run time limit exceeded (" + elapsedMs +
+      "ms > " + RUN_TIMEOUT_MS + "ms); no record appended (incomplete path)");
+  }
+  process.stderr.write("[record-worker] incomplete data, writing placeholder: " + reason + "\n");
+  const record = Object.assign({}, partialRecord, {
+    status: "incomplete",
+    incomplete_reason: reason,
+  });
+  mkdirSync(dirname(logPath), { recursive: true });
+  const line = JSON.stringify(record) + "\n";
+  const fd = openSync(logPath, "a");
+  try {
+    writeSync(fd, Buffer.from(line, "utf8"));
+  } finally {
+    closeSync(fd);
+  }
+  process.exit(0);
 }
 
 // A valid usage-bearing assistant message: has an id and a usage object carrying at
@@ -101,6 +145,64 @@ const lastMsg = hookData.last_assistant_message || "";
 const subagentType = hookData.agent_type || "unknown";
 // cwd is the orchestrator working directory — used to run the version-diff source.
 const hookCwd = hookData.cwd || "";
+
+// ── dispatch_id: idempotency key (FR-REC-005) ────────────────────────────────
+// In CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 mode the same SubagentStop event can
+// be delivered to multiple processes, causing this script to run twice and append
+// a duplicate record. We guard with a dispatch_id (toolUseId from the sibling
+// meta.json, or the agent transcript filename as fallback) checked against the
+// existing log before writing.
+//
+// Concurrency note: the check-then-write is NOT atomic at the OS level. Two
+// processes can both observe "not yet present" and both proceed to write. The
+// resulting duplicate is then deduplicated on next read (same dispatch_id). In
+// practice the window is sub-millisecond for the same file descriptor, and
+// O_APPEND ensures lines are not interleaved. A lock-file (O_EXCL) could close
+// the window entirely but adds complexity that is not warranted for this low-rate
+// hook; the post-read dedup path is the correct consumer-side contract.
+// TODO: if duplicate rate rises in future multi-agent modes, add an O_EXCL
+// lockfile (workerLogPath + ".lock") around the read-check-write block.
+
+// Read dispatch_id early (before any transcript processing) so we can bail fast.
+function computeDispatchId(agentTranscriptPath) {
+  if (!agentTranscriptPath) return null;
+  // Preferred: toolUseId from sibling .meta.json (globally unique per dispatch).
+  const metaPath = agentTranscriptPath.replace(/\.jsonl$/, ".meta.json");
+  try {
+    const meta = JSON.parse(readFileSync(metaPath, "utf8"));
+    const id = meta && meta.toolUseId;
+    if (typeof id === "string" && id) return id;
+  } catch { /* no meta → fall through */ }
+  // Fallback: session_id + ":" + agent transcript filename. Using only the
+  // basename risks cross-session collision when the same agent filename is
+  // reused across sessions (e.g. test/recovery flows). Prefixing with
+  // session_id makes the key session-scoped and much harder to collide.
+  return sessionId + ":" + basename(agentTranscriptPath);
+}
+
+const dispatchId = computeDispatchId(subPath);
+
+// Idempotency check: scan existing log for a record with the same dispatch_id.
+// Only perform the scan when the log file exists and dispatchId is known.
+if (dispatchId && existsSync(workerLogPath)) {
+  try {
+    const existing = readFileSync(workerLogPath, "utf8");
+    for (const rawLine of existing.split("\n")) {
+      const trimmed = rawLine.trim();
+      if (!trimmed) continue;
+      try {
+        const rec = JSON.parse(trimmed);
+        if (rec && rec.dispatch_id === dispatchId) {
+          // Duplicate: this dispatch_id is already recorded. Skip silently.
+          process.stderr.write(
+            "[record-worker] skipping duplicate: dispatch_id " + dispatchId + " already in log\n"
+          );
+          process.exit(0);
+        }
+      } catch { /* skip malformed lines */ }
+    }
+  } catch { /* log unreadable — proceed to write (best-effort) */ }
+}
 
 // ── orchestrator transcript (SESSION fields) ──────────────────────────────────
 
@@ -344,20 +446,55 @@ if (versionDiff.length > 0) {
   files = "unknown";
 }
 
-// ── required-field validation (hard dependencies — let it crash, no fake zeros) ──
-// If the transcripts were readable but yield no usable metrics, the record would be
-// all-zeros and silently poison CHK. Treat the derived metrics as hard requirements.
+// ── required-field validation ─────────────────────────────────────────────────
+// If the transcripts were readable but yield no usable metrics the data is
+// incomplete (subagent likely crashed mid-run). We no longer drop the record
+// entirely — instead we write a status=incomplete placeholder so the dispatch
+// is traceable. Fields that cannot be computed are recorded as null.
+// The partial record below carries all fields available at this point; the
+// writeIncomplete() call merges in status/incomplete_reason before appending.
+const partialRecord = {
+  session_id: sessionId,
+  orchestrator_action_count: orchAssistantMsgs.length > 0 ? orchestratorActionCount : null,
+  orchestrator_tokens: orchAssistantMsgs.length > 0 ? orchestratorTokens : null,
+  orchestrator_context_size: orchAssistantMsgs.length > 0 ? orchestratorContextSize : null,
+  worker_tokens: subAssistantMsgs.length > 0 ? workerTokens : null,
+  duration_ms: allTimestamps.length >= 2 ? durationMs : null,
+  model: model || null,
+  work: work || null,
+  result: result || null,
+  files,
+  subagent_type: subagentType,
+  dispatch_input_tokens: dispatchInputTokens,
+  summary_return_tokens: summaryReturnTokens,
+  conflict_marker: conflictMarker,
+  dispatch_id: dispatchId,
+  ts: new Date().toISOString(),
+};
+
 if (orchAssistantMsgs.length === 0) {
-  failHard("orchestrator transcript has no assistant messages with usage — cannot compute session metrics");
+  writeIncomplete(
+    "orchestrator transcript has no assistant messages with usage — session metrics unavailable",
+    partialRecord, workerLogPath
+  );
 }
 if (subAssistantMsgs.length === 0) {
-  failHard("subagent transcript has no assistant messages with usage — cannot compute worker tokens");
+  writeIncomplete(
+    "subagent transcript has no assistant messages with usage — worker_tokens unavailable",
+    partialRecord, workerLogPath
+  );
 }
 if (allTimestamps.length < 2) {
-  failHard("subagent transcript lacks >=2 timestamps — cannot compute duration_ms");
+  writeIncomplete(
+    "subagent transcript lacks >=2 timestamps — duration_ms unavailable",
+    partialRecord, workerLogPath
+  );
 }
 if (!model) {
-  failHard("subagent transcript has no model field — cannot record worker model");
+  writeIncomplete(
+    "subagent transcript has no model field — model unavailable",
+    partialRecord, workerLogPath
+  );
 }
 
 // ── assemble record ───────────────────────────────────────────────────────────
@@ -380,6 +517,11 @@ const record = {
   dispatch_input_tokens: dispatchInputTokens,
   summary_return_tokens: summaryReturnTokens,
   conflict_marker: conflictMarker,
+  // Idempotency key (FR-REC-005): toolUseId from sibling meta.json, or agent
+  // transcript filename as fallback. Used by duplicate-suppression check above
+  // and by consumers to deduplicate when Agent Teams delivers the event twice.
+  dispatch_id: dispatchId,
+  status: "ok",
   ts: new Date().toISOString(),
 };
 

@@ -167,7 +167,7 @@ test("EC-LOG: missing/unreadable orchestrator transcript fails hard, writes noth
     "must NOT write any worker-log record on hard-dependency failure");
 });
 
-test("EC-LOG: readable-but-empty subagent transcript fails hard (no fake-zero record)", () => {
+test("EC-LOG: readable-but-empty subagent transcript → writes status=incomplete placeholder (not dropped)", () => {
   const logPath = join(dir, "worker-log.jsonl");
   // valid orchestrator, but subagent transcript has no assistant usage at all
   const orchPath = join(dir, "orch-empty.jsonl");
@@ -176,11 +176,19 @@ test("EC-LOG: readable-but-empty subagent transcript fails hard (no fake-zero re
   writeFileSync(subPath, JSON.stringify({ type: "user", message: { content: "nothing useful" } }) + "\n");
   const stdin = JSON.stringify({ session_id: "s", transcript_path: orchPath, agent_transcript_path: subPath, last_assistant_message: "x", hook_event_name: "SubagentStop" });
   const r = runRecord(stdin, logPath);
-  assert.notEqual(r.status, 0, "must exit non-zero when subagent transcript has no usable metrics");
-  assert.ok(!existsSync(logPath) || readFileSync(logPath, "utf8").trim() === "", "must write nothing");
+  // New behaviour: SubagentStop fired but data is incomplete → write placeholder, exit 0
+  assert.equal(r.status, 0, "must exit 0 and write an incomplete placeholder");
+  assert.ok(existsSync(logPath), "must write the log file");
+  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  assert.equal(rec.status, "incomplete", "placeholder must carry status=incomplete");
+  assert.ok(typeof rec.incomplete_reason === "string" && rec.incomplete_reason.length > 0, "must carry incomplete_reason");
+  // session-level metrics that WERE computable must be non-null
+  assert.ok(rec.orchestrator_tokens !== null, "orchestrator_tokens must be set when orch transcript is valid");
+  // worker_tokens cannot be computed — must be null (not 0)
+  assert.equal(rec.worker_tokens, null, "worker_tokens must be null when subagent has no usable messages");
 });
 
-test("EC-LOG: assistant messages present but no usage → fails hard, writes nothing (round-3 fix)", () => {
+test("EC-LOG: assistant messages present but no usage → writes status=incomplete placeholder (round-3 fix)", () => {
   const logPath = join(dir, "worker-log.jsonl");
   const orchPath = join(dir, "orch-nousage.jsonl");
   const subPath = join(dir, "sub-nousage.jsonl");
@@ -191,8 +199,14 @@ test("EC-LOG: assistant messages present but no usage → fails hard, writes not
     JSON.stringify({ type: "assistant", timestamp: "2026-06-19T10:00:35.000Z", message: { id: "s2", model: "claude-sonnet-4-6" } }) + "\n");
   const stdin = JSON.stringify({ session_id: "s", transcript_path: orchPath, agent_transcript_path: subPath, last_assistant_message: "x", hook_event_name: "SubagentStop" });
   const r = runRecord(stdin, logPath);
-  assert.notEqual(r.status, 0, "must exit non-zero when assistant messages carry no usage");
-  assert.ok(!existsSync(logPath) || readFileSync(logPath, "utf8").trim() === "", "must write nothing (no fake-zero record)");
+  // New behaviour: SubagentStop fired but all assistant messages lack usage → placeholder
+  assert.equal(r.status, 0, "must exit 0 and write an incomplete placeholder");
+  assert.ok(existsSync(logPath), "must write the log file");
+  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  assert.equal(rec.status, "incomplete", "placeholder must carry status=incomplete");
+  assert.ok(typeof rec.incomplete_reason === "string" && rec.incomplete_reason.length > 0, "must carry incomplete_reason");
+  // orchestrator_tokens null because orch transcript also lacks usage
+  assert.equal(rec.orchestrator_tokens, null, "orchestrator_tokens must be null when orch has no usable messages");
 });
 
 // ── Phase 3 (T014/T016): 3 new fields + per-clause FR-REC-003/004 ────────────
@@ -534,4 +548,24 @@ test("FR-REC-004-③: write failure → non-zero exit, no all-empty fake record"
   const r = runRecord(makeFixture(), logPath);
   assert.notEqual(r.status, 0, "must exit non-zero on write failure");
   assert.ok(!existsSync(logPath), "must not create a fake record at an unwritable path");
+});
+
+// FR-REC-004-② (incomplete path): WORKER_RECORD_TIMEOUT_MS=0 + data-incomplete scenario
+// must write NOTHING — the timeout guard must apply to writeIncomplete() too, not just
+// the normal record path. Regression: before this fix, writeIncomplete() bypassed the
+// RUN_TIMEOUT_MS check entirely and wrote a placeholder even when over time limit.
+test("FR-REC-004-② (incomplete path): run-timeout also blocks incomplete placeholder write", () => {
+  const logPath = join(dir, "worker-log.jsonl");
+  // Empty subagent transcript → triggers the incomplete path (subAssistantMsgs.length === 0).
+  const orchPath = join(dir, "orch-timeout-inc.jsonl");
+  const subPath = join(dir, "sub-timeout-inc.jsonl");
+  writeFileSync(orchPath, JSON.stringify({ type: "assistant", timestamp: "2026-06-19T10:00:00.000Z", message: { id: "o1", model: "claude-opus-4-8", usage: { input_tokens: 10, output_tokens: 1 }, content: [{ type: "tool_use", name: "Bash" }] } }) + "\n");
+  // subagent transcript has NO assistant messages → writeIncomplete is triggered
+  writeFileSync(subPath, JSON.stringify({ type: "user", message: { content: "nothing" } }) + "\n");
+  const stdin = JSON.stringify({ session_id: "s", transcript_path: orchPath, agent_transcript_path: subPath, last_assistant_message: "x", hook_event_name: "SubagentStop" });
+  // WORKER_RECORD_TIMEOUT_MS=0 → always over limit → even incomplete path must not write
+  const r = runRecord(stdin, logPath, { WORKER_RECORD_TIMEOUT_MS: "0" });
+  assert.notEqual(r.status, 0, "must exit non-zero when over time limit, even on incomplete path");
+  assert.ok(!existsSync(logPath) || readFileSync(logPath, "utf8").trim() === "",
+    "must write NO record (not even a placeholder) when single-run time limit exceeded");
 });

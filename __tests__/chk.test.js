@@ -520,3 +520,97 @@ test("EC-CHK (P4): human-readable (no --json) shows N/A (not bare 0) for missing
   assert.match(inflationLine, /N\/A|null/i,
     "missing inflation must show N/A/null, not a bare 0");
 });
+
+// ── P1-B: incomplete record isolation — must not corrupt sibling complete records ──
+// One complete record + one status=incomplete placeholder in the same session.
+// The incomplete record has null worker_tokens and null orchestrator_context_size
+// (the typical crash-path values). The complete record has real token data.
+// Assertions: complete record's token/context metrics still compute; incomplete
+// record is NOT counted in dispatch_summary_cost (noise) but IS counted in
+// delegation_rate (the dispatch happened) and is visible via incomplete_count.
+const INCOMPLETE_ISOLATION_SAMPLE = [
+  // complete record — all numeric fields present
+  { session_id: "sessINC", orchestrator_action_count: 5, orchestrator_tokens: 800, orchestrator_context_size: 2000, worker_tokens: 60, duration_ms: 5000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 15, summary_return_tokens: null, ts: "2026-06-20T00:00:05.000Z", status: "ok", dispatch_id: "did-complete-1" },
+  // incomplete placeholder — null numeric fields (typical subagent-crash state)
+  { session_id: "sessINC", orchestrator_action_count: 5, orchestrator_tokens: null, orchestrator_context_size: null, worker_tokens: null, duration_ms: null, model: null, work: null, result: null, files: "unknown", dispatch_input_tokens: null, summary_return_tokens: null, ts: "2026-06-20T00:01:00.000Z", status: "incomplete", incomplete_reason: "subagent crashed", dispatch_id: "did-incomplete-1" },
+];
+
+function writeIncompleteSample() {
+  const p = join(dir, "incomplete-worker-log.jsonl");
+  writeFileSync(p, INCOMPLETE_ISOLATION_SAMPLE.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  return p;
+}
+
+test("P1-B: single incomplete record does NOT pull sibling complete record's token metrics to null", () => {
+  const out = JSON.parse(run(writeIncompleteSample()).stdout);
+  // worker_token_ratio must be non-null: only the complete record (worker=60, orch=800)
+  // should count. Ratio = 60 / (60+800) = 60/860.
+  const ratio = out.worker_token_ratio.sessINC;
+  assert.ok(ratio !== null, "worker_token_ratio must not be null when at least one complete record exists");
+  assert.ok(Math.abs(Number(ratio) - 60 / 860) < 1e-9,
+    `worker_token_ratio sessINC must be 60/860 = ${60 / 860}, got ${ratio}`);
+  // context metrics: complete record's context_size is 2000, so growth=0 (single point),
+  // peak=0 (single complete record). They must not be null.
+  assert.strictEqual(out.context_net_growth.sessINC, 0, "context_net_growth not null (one complete record, first=last=2000)");
+  // dispatch_summary_cost: only the complete record's entry should appear (1 entry, not 2)
+  const dsc = out.dispatch_summary_cost.sessINC;
+  assert.ok(Array.isArray(dsc), "dispatch_summary_cost is an array");
+  assert.equal(dsc.length, 1, "dispatch_summary_cost has 1 entry (only complete records; incomplete excluded as noise)");
+  // delegation_rate: both records count (2 dispatches / 5 actions = 0.4)
+  assert.ok(Math.abs(Number(out.delegation_rate.sessINC) - 2 / 5) < 1e-9,
+    "delegation_rate counts both complete and incomplete records (incomplete dispatch is real)");
+  // incomplete_count must expose the 1 incomplete record
+  assert.equal(out.incomplete_count.sessINC, 1, "incomplete_count must report the 1 placeholder record");
+});
+
+// ── P1-B extra: incomplete record must not pollute context_peak ──────────────
+// Regression check: the maxCtx loop previously iterated over recs (all records,
+// including incomplete placeholders with null context_size). Although null coerces
+// to 0 and does not win > comparison against a positive value, the loop must use
+// completeRecs to keep context computation consistent and correct. Explicitly assert
+// context_peak for the sessINC fixture (one complete record, peak=0 relative to
+// single point) to pin the fix.
+test("P1-B: incomplete record with null context_size does not corrupt sibling context_peak", () => {
+  const out = JSON.parse(run(writeIncompleteSample()).stdout);
+  // Only one complete record (context_size=2000). First=last=max=2000. peak = max-first = 0.
+  // If the incomplete record's null were included in maxCtx scan it would not overflow
+  // (null coerces to 0 < 2000), but the loop must explicitly use completeRecs.
+  assert.strictEqual(out.context_peak.sessINC, 0,
+    "context_peak must be 0 (single complete record, null from incomplete excluded)");
+  assert.strictEqual(out.context_net_growth.sessINC, 0,
+    "context_net_growth must be 0 (single complete record, null from incomplete excluded)");
+  // Verify the incomplete record itself is still exposed
+  assert.equal(out.incomplete_count.sessINC, 1, "incomplete_count still reports the placeholder");
+});
+
+// ── P1-A: dispatch_id dedup in check-metrics — same dispatch_id counted once ──
+// Two records with the same dispatch_id are an Agent Teams duplicate delivery.
+// check-metrics must deduplicate by dispatch_id (keep first) before grouping,
+// so the duplicated record is never double-counted in delegation_rate, tokens, etc.
+const DEDUP_SAMPLE = [
+  // First delivery of the same dispatch
+  { session_id: "sessDED", orchestrator_action_count: 4, orchestrator_tokens: 700, orchestrator_context_size: 1500, worker_tokens: 50, duration_ms: 3000, model: "claude-sonnet-4-6", work: "same work", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_tokens: null, ts: "2026-06-20T00:00:03.000Z", status: "ok", dispatch_id: "did-dup-x" },
+  // Second delivery — identical dispatch_id: this is the duplicate, must be skipped
+  { session_id: "sessDED", orchestrator_action_count: 4, orchestrator_tokens: 700, orchestrator_context_size: 1500, worker_tokens: 50, duration_ms: 3000, model: "claude-sonnet-4-6", work: "same work", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_tokens: null, ts: "2026-06-20T00:00:03.001Z", status: "ok", dispatch_id: "did-dup-x" },
+];
+
+function writeDedupSample() {
+  const p = join(dir, "dedup-worker-log.jsonl");
+  writeFileSync(p, DEDUP_SAMPLE.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  return p;
+}
+
+test("P1-A: duplicate dispatch_id records are counted only once in check-metrics", () => {
+  const out = JSON.parse(run(writeDedupSample()).stdout);
+  // Only 1 unique dispatch (after dedup) / 4 orchestrator actions = 0.25
+  // Without dedup: 2 records / 4 actions = 0.5 (wrong)
+  assert.ok(Math.abs(Number(out.delegation_rate.sessDED) - 1 / 4) < 1e-9,
+    `delegation_rate must be 1/4 after dedup (not 2/4); got ${out.delegation_rate.sessDED}`);
+  // dispatch_summary_cost must have exactly 1 entry (not 2)
+  assert.equal(out.dispatch_summary_cost.sessDED.length, 1,
+    "dispatch_summary_cost must have 1 entry after dispatch_id dedup (not 2)");
+  // worker_token_ratio: only 1 record counted — 50 / (50 + 700) = 50/750
+  const ratio = out.worker_token_ratio.sessDED;
+  assert.ok(Math.abs(Number(ratio) - 50 / 750) < 1e-9,
+    `worker_token_ratio must reflect deduped record only: 50/750 = ${50 / 750}, got ${ratio}`);
+});

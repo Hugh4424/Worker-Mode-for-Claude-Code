@@ -169,10 +169,32 @@ function concurrentSpan(intervals) {
 
 const IDLE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes (FR-CHK-002)
 
+// ── dispatch_id dedup (P1-A) ─────────────────────────────────────────────────
+// In Agent Teams mode the same SubagentStop event can be delivered twice,
+// causing record-worker.mjs to append a duplicate (check-then-write is not
+// atomic at the OS level). The consumer-side contract is to dedup here by
+// dispatch_id before any metric computation so duplicates never inflate
+// delegation_rate, worker_tokens, or time spans.
+//
+// Records without a dispatch_id (old-format or fallback-failed) are kept as-is:
+// we cannot identify which other record they might duplicate, so we must never
+// drop them. Only records that SHARE a non-null dispatch_id are deduplicated
+// (keep the first occurrence in file order).
+const seenDispatchIds = new Set();
+const deduplicatedRecords = [];
+for (const rec of records) {
+  const did = rec.dispatch_id;
+  if (did != null && did !== "") {
+    if (seenDispatchIds.has(did)) continue; // duplicate — skip
+    seenDispatchIds.add(did);
+  }
+  deduplicatedRecords.push(rec);
+}
+
 // ── group by session_id ─────────────────────────────────────────────────────
 
 const sessions = new Map();
-for (const rec of records) {
+for (const rec of deduplicatedRecords) {
   const sid = rec.session_id;
   if (!sid) continue;
   if (!sessions.has(sid)) sessions.set(sid, []);
@@ -206,10 +228,28 @@ const workerTimeRatio = {};
 const concurrentWorkerTimeRatio = {};
 const dispatchSummaryCost = {};
 const inflationDenominatorSource = {};
+// Incomplete-record visibility (P1-B): how many status=incomplete placeholders
+// exist per session. These represent dispatches that happened but whose data is
+// partial (subagent crashed mid-run). Visible so auditors can assess data quality.
+const incompleteCount = {};
 
 for (const [sid, recs] of sessions) {
-  // delegation_rate = records in session / MAX orchestrator_action_count seen
-  // (latest snapshot of the orchestrator's total tool-call count).
+  // Isolate status=incomplete placeholder records (P1-B). These prove a dispatch
+  // happened but carry null/missing numeric fields, so including them in data-
+  // dependent metric computations would corrupt the entire session's values.
+  //
+  // Strategy: incomplete records count toward delegation_rate (the dispatch is real
+  // — it's the data that is partial, not the event) and are reported via
+  // incomplete_count. They are excluded from every metric that requires numeric
+  // fields (tokens, context, time intervals). This is the most honest treatment:
+  // delegation_rate reflects actual dispatch volume, while null in token/context
+  // metrics correctly signals "data incomplete" rather than fabricating a wrong number.
+  const completeRecs = recs.filter((r) => r.status !== "incomplete");
+  const numIncomplete = recs.length - completeRecs.length;
+  incompleteCount[sid] = numIncomplete;
+
+  // delegation_rate = ALL records (complete + incomplete) / MAX orchestrator_action_count.
+  // Incomplete records still represent real dispatches, so they count in the numerator.
   let maxActions = 0;
   for (const r of recs) {
     if (typeof r.orchestrator_action_count === "number" && r.orchestrator_action_count > maxActions) {
@@ -223,13 +263,16 @@ for (const [sid, recs] of sessions) {
   // Context metrics (ordered by ts). FR-CHK-004 BUG FIX: distinguish a MISSING
   // context_size (null/undefined) from a real 0. The old `|| 0` turned a missing
   // value into 0 — masking missing-data as a real zero and corrupting net_growth /
-  // peak / inflation. If ANY record in the session lacks a numeric context_size we
-  // cannot trust the context series → mark the three context metrics null (missing)
-  // and still compute every non-context metric below.
-  const ordered = recs
+  // peak / inflation. If ANY *complete* record in the session lacks a numeric
+  // context_size we cannot trust the context series → mark the three context metrics
+  // null (missing) and still compute every non-context metric below.
+  // Uses completeRecs: incomplete placeholders have null context_size by design and
+  // must not pull the whole session's context metrics to null.
+  const ordered = completeRecs
     .slice()
     .sort((a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime());
-  const ctxMissing = recs.some((r) => typeof r.orchestrator_context_size !== "number");
+  const ctxMissing = completeRecs.length === 0 ||
+    completeRecs.some((r) => typeof r.orchestrator_context_size !== "number");
 
   let netGrowth = null;
   let peak = null;
@@ -237,7 +280,7 @@ for (const [sid, recs] of sessions) {
     const firstCtx = ordered[0].orchestrator_context_size;
     const lastCtx = ordered[ordered.length - 1].orchestrator_context_size;
     let maxCtx = firstCtx;
-    for (const r of recs) {
+    for (const r of completeRecs) {
       const c = r.orchestrator_context_size;
       if (c > maxCtx) maxCtx = c;
     }
@@ -252,14 +295,17 @@ for (const [sid, recs] of sessions) {
   // orchestrator_vs_worker_tokens = { orchestrator: MAX orch tokens, worker: SUM worker tokens }
   // null-vs-0 discipline (same standard as ctxMissing above): a MISSING worker_tokens
   // (non-numeric in any record) must NOT be silently summed as 0 — that would fabricate
-  // a fake-low worker total and corrupt worker_token_ratio. If any record lacks a
-  // numeric worker_tokens we cannot trust the worker total → worker side is null
+  // a fake-low worker total and corrupt worker_token_ratio. If any *complete* record lacks
+  // a numeric worker_tokens we cannot trust the worker total → worker side is null
   // (missing), and worker_token_ratio is null too. orchestrator side stays a best-effort
   // max (it has its own per-record numeric guard).
+  // Uses completeRecs: incomplete placeholders always have null worker_tokens (by design)
+  // and must not poison the whole session's token metrics.
   let maxOrch = 0;
   let sumWorker = 0;
-  const workerTokensMissing = recs.some((r) => typeof r.worker_tokens !== "number");
-  for (const r of recs) {
+  const workerTokensMissing = completeRecs.length === 0 ||
+    completeRecs.some((r) => typeof r.worker_tokens !== "number");
+  for (const r of completeRecs) {
     if (typeof r.orchestrator_tokens === "number" && r.orchestrator_tokens > maxOrch) {
       maxOrch = r.orchestrator_tokens;
     }
@@ -278,7 +324,11 @@ for (const [sid, recs] of sessions) {
   workerTokenRatio[sid] = workerTokensMissing || tokenDenom <= 0 ? null : sumWorker / tokenDenom;
 
   // ── time intervals (shared by ②③④) ─────────────────────────────────────────
-  const intervals = recs.map(workerInterval).filter(Boolean);
+  // Uses completeRecs: incomplete placeholders may carry null duration_ms/ts, which
+  // workerInterval() would convert to null intervals that filter() drops. However,
+  // including them at all risks polluting the time span with a half-formed interval.
+  // Using completeRecs is conservative and correct.
+  const intervals = completeRecs.map(workerInterval).filter(Boolean);
   const merged = mergeIntervals(intervals);
   // Total task time = span from earliest worker start to latest worker end.
   const totalStart = merged.length ? merged[0][0] : 0;
@@ -337,7 +387,9 @@ for (const [sid, recs] of sessions) {
   // ── ⑤ dispatch_summary_cost = per-dispatch [input, summary] absolute tokens ──
   // Two absolute values per delegation; either may be null → that field stays null
   // (missing), NEVER faked 0. An entry with both null = missing dispatch cost.
-  dispatchSummaryCost[sid] = recs.map((r) => ({
+  // Uses completeRecs: incomplete placeholders have null dispatch tokens by construction;
+  // including them would add noise entries without any real dispatch cost signal.
+  dispatchSummaryCost[sid] = completeRecs.map((r) => ({
     dispatch_input_tokens:
       typeof r.dispatch_input_tokens === "number" ? r.dispatch_input_tokens : null,
     summary_return_tokens:
@@ -361,6 +413,9 @@ const out = {
   concurrent_worker_time_ratio: concurrentWorkerTimeRatio,
   dispatch_summary_cost: dispatchSummaryCost,
   inflation_denominator_source: inflationDenominatorSource,
+  // Audit field: how many status=incomplete placeholders exist per session.
+  // Non-zero means some dispatches lost their numeric data (subagent crash).
+  incomplete_count: incompleteCount,
 };
 
 if (json) {
@@ -401,6 +456,8 @@ if (json) {
           .map((e) => "[in=" + na(e.dispatch_input_tokens) + " summary=" + na(e.summary_return_tokens) + "]")
           .join(" ");
     process.stdout.write("  dispatch_summary_cost (每次派发 [输入, 摘要] token): " + dscStr + "\n");
+    const ic = incompleteCount[sid] || 0;
+    process.stdout.write("  incomplete_count (数据残缺的派发占位数): " + ic + "\n");
   }
 }
 
