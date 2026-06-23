@@ -11,6 +11,8 @@
     "workers": "agents/",
     "subagentLogHook": "hooks/hooks.json",
     "recordScript": "hooks/record-worker.mjs",
+    "nudgeHook": "hooks/nudge-delegation.mjs",
+    "checkConfigHook": "hooks/check-config.mjs",
     "stateTemplate": "templates/project-state.md",
     "checkTool": "tools/check-metrics.mjs",
     "contextHealthTool": "tools/check-context-health.mjs"

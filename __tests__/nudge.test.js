@@ -701,3 +701,673 @@ test("long transcript (3000 lines) completes within 2 s (bounded scan)", () => {
   const out = parseOutput(r.stdout);
   assert.ok(out !== null, "big reads in last window must still fire nudge on large transcript");
 });
+
+// ── Bash self-work detector tests ─────────────────────────────────────────────
+
+// Helper: build N Bash tool turns with the given command (no paired result needed for counting).
+function bashTurns(n, command, startIdx = 0) {
+  const lines = [];
+  for (let i = 0; i < n; i++) {
+    const id = `toolu_bash${startIdx + i}`;
+    const msgId = `amsg_bash${startIdx + i}`;
+    lines.push(asstLine(msgId, [{ id, name: "Bash", input: { command } }]));
+    lines.push(resultLine(id, "output"));
+  }
+  return lines;
+}
+
+// Test B1: 8 read-class Bash in one epoch → bash nudge fires.
+test("bash nudge fires when >= 8 read-class Bash in one epoch", () => {
+  const lines = bashTurns(8, "grep -r 'foo' /src");
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "bash nudge must fire with 8 read-class Bash calls");
+  assert.match(out.additionalContext, /委派检查/, "must contain 委派检查");
+  assert.match(out.additionalContext, /epoch/, "bash nudge must mention epoch");
+  assert.match(out.additionalContext, /Bash/, "bash nudge must mention Bash");
+});
+
+// Test B2: only 7 read-class Bash in one epoch → no bash nudge.
+test("bash nudge does NOT fire with only 7 read-class Bash in one epoch", () => {
+  const lines = bashTurns(7, "cat /src/file.ts");
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  // May or may not fire (from other signals) but bash-specific nudge shouldn't fire.
+  // We check: if anything fires, it should not be a Bash-nudge (no "epoch" keyword).
+  const out = parseOutput(r.stdout);
+  if (out !== null) {
+    assert.ok(
+      !out.additionalContext.includes("epoch") || !out.additionalContext.includes("Bash"),
+      "bash nudge must NOT fire with only 7 read-class Bash calls"
+    );
+  }
+  // More precisely: 7 small-result Bash calls don't meet any threshold.
+  // (small result = isBigSelfRead false, bash count = 7 < 8)
+  assert.equal(out, null, "no nudge should fire with only 7 Bash calls (small results)");
+});
+
+// Test B3: 7 Bash in epoch1, Agent resets, 3 Bash in epoch2 → no bash nudge.
+test("Agent dispatch resets bash count; 7+Agent+3 does not trigger bash nudge", () => {
+  const preAgent = bashTurns(7, "grep foo /src", 0);
+  const agentLines = agentTurn(200);
+  const postAgent = bashTurns(3, "cat /src/bar.ts", 10);
+  const tp = writeTranscript([...preAgent, ...agentLines, ...postAgent]);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  // After reset, epoch2 has only 3 bash → no bash nudge.
+  if (out !== null) {
+    const isBashnudge = out.additionalContext.includes("epoch") && out.additionalContext.includes("Bash");
+    assert.equal(isBashnudge, false, "bash nudge must NOT fire after epoch reset (only 3 post-agent bash)");
+  }
+});
+
+// Test B4: test-class Bash (npm test) counts toward bash nudge.
+test("test-class Bash (npm test) counts toward bash nudge threshold", () => {
+  // Mix of read-class and test-class, total >= 8.
+  const readLines = bashTurns(4, "grep -r 'foo' .", 0);
+  const testLines = bashTurns(4, "npm test", 4);
+  const tp = writeTranscript([...readLines, ...testLines]);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "mixed read+test Bash (total 8) must trigger bash nudge");
+  assert.match(out.additionalContext, /委派检查/);
+});
+
+// Test B5: lightweight Bash (ls, git status) does NOT count.
+test("lightweight Bash (ls, git status) does not count toward bash threshold", () => {
+  // 8 ls/git-status Bash calls → should NOT trigger bash nudge.
+  const lsLines = bashTurns(5, "ls /src", 0);
+  const gitLines = bashTurns(3, "git status", 5);
+  const tp = writeTranscript([...lsLines, ...gitLines]);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  const out = parseOutput(r.stdout);
+  if (out !== null) {
+    const isBashnudge = out.additionalContext.includes("epoch") && out.additionalContext.includes("Bash");
+    assert.equal(isBashnudge, false, "lightweight Bash must NOT count toward bash nudge");
+  }
+});
+
+// ── NEW TESTS: Changes 1-4 ────────────────────────────────────────────────────
+
+// Change 1a: rg / find / fd / git grep / jq / yq count as read-class
+test("改动1a: 8 rg commands in epoch triggers bash nudge (rg added to read-class)", () => {
+  const lines = bashTurns(8, "rg 'TODO' /src --type ts", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "8 rg calls must trigger bash nudge");
+  assert.match(out.additionalContext, /委派检查/);
+});
+
+test("改动1a: 8 find commands in epoch triggers bash nudge", () => {
+  const lines = bashTurns(8, "find . -name '*.ts' -type f", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "8 find calls must trigger bash nudge");
+  assert.match(out.additionalContext, /委派检查/);
+});
+
+test("改动1a: 8 fd commands in epoch triggers bash nudge", () => {
+  const lines = bashTurns(8, "fd --type f --extension ts src/", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "8 fd calls must trigger bash nudge");
+});
+
+test("改动1a: jq and yq count as read-class", () => {
+  const jqLines = bashTurns(4, "jq '.items[]' data.json", 0);
+  const yqLines = bashTurns(4, "yq '.spec.containers' pod.yaml", 4);
+  const tp = writeTranscript([...jqLines, ...yqLines]);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "4 jq + 4 yq = 8 read-class must trigger bash nudge");
+});
+
+// Change 1b: write-class Bash counts too
+test("改动1b: 8 write-class Bash (echo > file) in epoch triggers nudge", () => {
+  const lines = bashTurns(8, 'echo "content" > /tmp/out.txt', 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "8 echo-redirect calls must trigger bash nudge");
+  assert.match(out.additionalContext, /委派检查/);
+});
+
+test("改动1b: sed -i counts as write-class", () => {
+  const lines = bashTurns(8, "sed -i 's/foo/bar/g' file.ts", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "8 sed -i calls must trigger bash nudge");
+});
+
+test("改动1b: tee counts as write-class", () => {
+  const lines = bashTurns(8, "some-cmd | tee output.txt", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "8 tee calls must trigger bash nudge");
+});
+
+// Change 2: narrowed test-class — node -v / node check-config.mjs must NOT count
+test("改动2: node -v must NOT count as test-class (收窄误判)", () => {
+  // 8 'node -v' calls — each should NOT match test-class after fix
+  const lines = bashTurns(8, "node -v", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  const out = parseOutput(r.stdout);
+  // With only 8 non-read/non-test/non-write Bash calls, no bash nudge should fire
+  assert.equal(out, null, "node -v must not count as test-class; 8 calls must not trigger nudge");
+});
+
+test("改动2: node check-config.mjs must NOT count as test-class", () => {
+  const lines = bashTurns(8, "node check-config.mjs", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  const out = parseOutput(r.stdout);
+  assert.equal(out, null, "node check-config.mjs must not count as test-class");
+});
+
+test("改动2: node foo.test.mjs DOES count as test-class", () => {
+  const lines = bashTurns(8, "node foo.test.mjs", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "node foo.test.mjs must count as test-class and trigger nudge");
+});
+
+test("改动2: node bar.spec.ts DOES count as test-class", () => {
+  const lines = bashTurns(8, "node bar.spec.ts", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "node bar.spec.ts must count as test-class");
+});
+
+test("改动2: node --test counts as test-class", () => {
+  const lines = bashTurns(8, "node --test src/", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "node --test must count as test-class");
+});
+
+test("改动2: pnpm test and yarn test count as test-class", () => {
+  const pnpmLines = bashTurns(4, "pnpm test", 0);
+  const yarnLines = bashTurns(4, "yarn test", 4);
+  const tp = writeTranscript([...pnpmLines, ...yarnLines]);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "pnpm test + yarn test must count as test-class and trigger nudge");
+});
+
+// Change 3: separate read/test/write counts, nudge text shows breakdown
+test("改动3: nudge text shows read/test/write breakdown when triggered", () => {
+  // Mix: 4 read-class + 4 write-class = 8 total
+  const readLines = bashTurns(4, "rg 'pattern' /src", 0);
+  const writeLines = bashTurns(4, 'echo "x" > out.txt', 4);
+  const tp = writeTranscript([...readLines, ...writeLines]);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "mixed read+write 8 total must trigger bash nudge");
+  // Text must mention read count and write count separately
+  assert.match(out.additionalContext, /读.*\d|读\s*\d|\d.*次.*读/, "nudge must mention read count");
+  assert.match(out.additionalContext, /写.*\d|写\s*\d|\d.*次.*写/, "nudge must mention write count");
+});
+
+test("改动3: nudge text shows only non-zero categories", () => {
+  // Only test-class: 8 npm test calls
+  const lines = bashTurns(8, "npm test", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "8 npm test must trigger bash nudge");
+  // Must mention test count
+  assert.match(out.additionalContext, /测.*\d|\d.*次.*测/, "nudge must mention test count for test-only case");
+});
+
+// Change 4: session-level delegation dashboard
+function makeSessionLines(selfToolCount, agentCount) {
+  // Build a transcript with selfToolCount Read turns (non-authority) + agentCount Agent turns
+  // interleaved so they don't form dense epochs that trigger epoch nudge alone.
+  // We spread agent dispatches throughout but keep self-reads high enough to cross threshold.
+  const lines = [];
+  let bashIdx = 0;
+  let agentIdx = 0;
+  const selfPerAgent = Math.floor(selfToolCount / Math.max(agentCount, 1));
+
+  for (let a = 0; a < agentCount; a++) {
+    // selfPerAgent reads between agents
+    for (let s = 0; s < selfPerAgent; s++) {
+      const id = `toolu_ses_r${bashIdx}`;
+      lines.push(asstLine(`amsg_ses_r${bashIdx}`, [{ id, name: "Read", input: { file_path: `/x/f${bashIdx}.ts` } }]));
+      lines.push(resultLine(id, "small")); // small result, won't trigger density nudge
+      bashIdx++;
+    }
+    const agId = `toolu_ses_ag${agentIdx}`;
+    lines.push(asstLine(`amsg_ses_ag${agentIdx}`, [{ id: agId, name: "Agent", input: { prompt: "work" } }]));
+    lines.push(resultLine(agId, "done"));
+    agentIdx++;
+  }
+  // Remaining self reads
+  const remaining = selfToolCount - selfPerAgent * agentCount;
+  for (let s = 0; s < remaining; s++) {
+    const id = `toolu_ses_r${bashIdx}`;
+    lines.push(asstLine(`amsg_ses_r${bashIdx}`, [{ id, name: "Read", input: { file_path: `/x/f${bashIdx}.ts` } }]));
+    lines.push(resultLine(id, "small"));
+    bashIdx++;
+  }
+  return lines;
+}
+
+test("改动4: 委派仪表盘 fires when self-work >> delegation (>=3x and >=12 self)", () => {
+  // 18 self-tool Read turns, only 2 Agent dispatches → 18 >= 2*3=6 and >= 12 → dashboard fires
+  // We need to force a nudge too (use big reads to fire density nudge), then check dashboard
+  // The dashboard piggybacks on a bash/density nudge (never fires alone).
+  // Let's build: 15 small reads (not authority) + 1 big read + 2 Agents
+  // The 1 big read fires light nudge; dashboard check runs alongside.
+  const lines = [];
+
+  // Add 2 Agent dispatches first
+  for (let a = 0; a < 2; a++) {
+    const agId = `toolu_dash_ag${a}`;
+    lines.push(asstLine(`amsg_dash_ag${a}`, [{ id: agId, name: "Agent", input: { prompt: "work" } }]));
+    lines.push(resultLine(agId, "done"));
+  }
+  // Add 15 small self-reads (non-authority files) — each counts as self but not big
+  // We only need 12+ self-tool total (including the big one below)
+  for (let i = 0; i < 11; i++) {
+    const id = `toolu_dash_r${i}`;
+    lines.push(asstLine(`amsg_dash_r${i}`, [{ id, name: "Read", input: { file_path: `/x/f${i}.ts` } }]));
+    lines.push(resultLine(id, "small"));
+  }
+  // 1 big read to trigger a nudge
+  const bigId = "toolu_dash_big";
+  lines.push(asstLine("amsg_dash_big", [{ id: bigId, name: "Read", input: { file_path: "/x/bigfile.ts" } }]));
+  lines.push(resultLine(bigId, bigContent));
+
+  // Total self: 12 (11 small + 1 big Read), Agent: 2 → 12 >= 2*3=6 AND 12>=12 → dashboard fires
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "nudge must fire (big read triggers light nudge)");
+  assert.match(out.additionalContext, /委派仪表盘/, "dashboard line must appear when self >> delegation");
+  assert.match(out.additionalContext, /worker.*占比|占比.*worker|worker.*%/, "dashboard must show worker ratio");
+});
+
+test("改动4: 委派仪表盘 does NOT fire when delegation is healthy (low self/agent ratio)", () => {
+  // 4 self reads + 8 Agents → ratio 4/8 < 3, not enough to trigger dashboard
+  const lines = [];
+  for (let a = 0; a < 8; a++) {
+    const agId = `toolu_hd_ag${a}`;
+    lines.push(asstLine(`amsg_hd_ag${a}`, [{ id: agId, name: "Agent", input: { prompt: "work" } }]));
+    lines.push(resultLine(agId, "done"));
+  }
+  // 1 big read to trigger some nudge (so we can check additionalContext)
+  const bigId = "toolu_hd_big";
+  lines.push(asstLine("amsg_hd_big", [{ id: bigId, name: "Read", input: { file_path: "/x/bigfile.ts" } }]));
+  lines.push(resultLine(bigId, bigContent));
+
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  // May or may not fire a nudge, but if it does, must NOT contain dashboard
+  if (out !== null) {
+    assert.ok(
+      !out.additionalContext.includes("委派仪表盘"),
+      "dashboard must NOT appear when delegation ratio is healthy"
+    );
+  }
+});
+
+test("改动4: authority file reads are NOT counted in self-work for dashboard", () => {
+  // 15 coordinator.md reads (authority) + 0 Agents → authority reads exempt, self=0, no dashboard
+  const lines = [];
+  for (let i = 0; i < 15; i++) {
+    const id = `toolu_auth${i}`;
+    lines.push(asstLine(`amsg_auth${i}`, [{ id, name: "Read", input: { file_path: "/agents/coordinator.md" } }]));
+    lines.push(resultLine(id, bigContent));
+  }
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  // No nudge should fire at all (authority files exempt from everything)
+  const out = parseOutput(r.stdout);
+  assert.equal(out, null, "authority file reads must not trigger any nudge");
+});
+
+// P1#10 guard for all new trigger cases
+test("P1#10: rg-triggered nudge only outputs additionalContext, no block/deny", () => {
+  const lines = bashTurns(8, "rg 'foo' /src", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assertNoBlockOutput(r);
+});
+
+test("P1#10: write-class-triggered nudge only outputs additionalContext, no block/deny", () => {
+  const lines = bashTurns(8, "sed -i 's/x/y/' file.ts", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assertNoBlockOutput(r);
+});
+
+test("P1#10: dashboard-triggered nudge only outputs additionalContext, no block/deny", () => {
+  // Same as the dashboard-fires test but just checking P1#10
+  const lines = [];
+  for (let a = 0; a < 2; a++) {
+    const agId = `toolu_p110_ag${a}`;
+    lines.push(asstLine(`amsg_p110_ag${a}`, [{ id: agId, name: "Agent", input: { prompt: "work" } }]));
+    lines.push(resultLine(agId, "done"));
+  }
+  for (let i = 0; i < 11; i++) {
+    const id = `toolu_p110_r${i}`;
+    lines.push(asstLine(`amsg_p110_r${i}`, [{ id, name: "Read", input: { file_path: `/x/f${i}.ts` } }]));
+    lines.push(resultLine(id, "small"));
+  }
+  const bigId = "toolu_p110_big";
+  lines.push(asstLine("amsg_p110_big", [{ id: bigId, name: "Read", input: { file_path: "/x/bigfile.ts" } }]));
+  lines.push(resultLine(bigId, bigContent));
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assertNoBlockOutput(r);
+});
+
+// ── NEW: Fix 1 — sessionSelfToolCount must skip light Bash ───────────────────
+
+test("修复1: 轻量Bash(ls/git status)不算自干，仪表盘不虚高", () => {
+  // Dashboard fires when: self >= agent*3 AND self >= 12.
+  // Bug: light Bash counted as self → 3 agents + 12 light Bash + 1 big Read = self 13, agents 3
+  //      → 13 >= 3*3=9 AND 13>=12 → fires dashboard incorrectly.
+  // Fix: light Bash excluded → self = 1 (only the big Read) → 1 < 9 → no dashboard.
+  const lines = [];
+  // 3 Agents (keeps ratio threshold reachable if light Bash counts)
+  for (let i = 0; i < 3; i++) {
+    const agId = `toolu_fix1_ag${i}`;
+    lines.push(asstLine(`amsg_fix1_ag${i}`, [{ id: agId, name: "Agent", input: { prompt: "work" } }]));
+    lines.push(resultLine(agId, "done"));
+  }
+  // 12 lightweight Bash calls (ls / git status / wc -l): with bug they inflate self to 13
+  const lightCmds = ["ls /src", "git status", "wc -l package.json", "which node"];
+  for (let i = 0; i < 12; i++) {
+    const id = `toolu_fix1_b${i}`;
+    const cmd = lightCmds[i % lightCmds.length];
+    lines.push(asstLine(`amsg_fix1_b${i}`, [{ id, name: "Bash", input: { command: cmd } }]));
+    lines.push(resultLine(id, "output"));
+  }
+  // 1 big read to trigger a light nudge (so additionalContext exists to inspect)
+  const bigId = "toolu_fix1_big";
+  lines.push(asstLine("amsg_fix1_big", [{ id: bigId, name: "Read", input: { file_path: "/x/bigfile.ts" } }]));
+  lines.push(resultLine(bigId, bigContent));
+
+  // After fix: self = 1 (just the big Read), agents = 3 → 1 < 3*3=9 → dashboard must NOT appear.
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  // A light nudge fires (1 big read). Dashboard must NOT appear (light Bash excluded from self).
+  assert.ok(out !== null, "light nudge should fire from the big read");
+  assert.ok(
+    !out.additionalContext.includes("委派仪表盘"),
+    "修复1: 轻量Bash不应算自干，仪表盘不应出现 (self=1 after fix, agents=3 → ratio healthy)"
+  );
+});
+
+test("修复1: 真正的自干多时仪表盘正常触发（对照组）", () => {
+  // Control: real self-work (Read/Edit/Write, not light Bash) triggers dashboard.
+  // 12 Read calls (non-authority) + 2 Agents → self=12, agents=2 → 12 >= 2*3=6 AND 12>=12 → fires.
+  const lines = [];
+  for (let a = 0; a < 2; a++) {
+    const agId = `toolu_fix1ctrl_ag${a}`;
+    lines.push(asstLine(`amsg_fix1ctrl_ag${a}`, [{ id: agId, name: "Agent", input: { prompt: "work" } }]));
+    lines.push(resultLine(agId, "done"));
+  }
+  for (let i = 0; i < 11; i++) {
+    const id = `toolu_fix1ctrl_r${i}`;
+    lines.push(asstLine(`amsg_fix1ctrl_r${i}`, [{ id, name: "Read", input: { file_path: `/x/f${i}.ts` } }]));
+    lines.push(resultLine(id, "small"));
+  }
+  const bigId = "toolu_fix1ctrl_big";
+  lines.push(asstLine("amsg_fix1ctrl_big", [{ id: bigId, name: "Read", input: { file_path: "/x/big.ts" } }]));
+  lines.push(resultLine(bigId, bigContent));
+
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "nudge must fire");
+  assert.match(out.additionalContext, /委派仪表盘/, "修复1对照组: 真实自干(Read)12次应触发仪表盘");
+});
+
+// ── NEW: Fix 2 — Bash classification order write→test→read ──────────────────
+
+test("修复2: sed -i 归写类而非读类 (顺序改为 write→test→read)", () => {
+  // Before fix: sed is in BASH_READ_RE, and read is checked first → epochBashReadCount++
+  // After fix: write is checked first → epochBashWriteCount++
+  // We verify this indirectly by checking the nudge text:
+  // epochBashWriteCount should appear in the breakdown if nudge fires.
+  // With 8 sed -i calls, bash nudge fires. The breakdown should mention write not read.
+  const lines = bashTurns(8, "sed -i 's/foo/bar/g' file.ts", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "8 sed -i calls must trigger bash nudge");
+  // The nudge text should mention writes (写) not reads (读) for sed -i after the fix
+  assert.match(out.additionalContext, /委派检查/, "must contain 委派检查");
+  // After fix: sed -i goes to write bucket → nudge text mentions 写 > 0
+  assert.match(out.additionalContext, /写.*[1-9]|[1-9].*写/, "修复2: sed -i 应归写类，nudge 文本应提及写次数");
+  // Must NOT say only reads (读) caused it — sed -i is write
+  // We check by ensuring 读 count mentioned in text is 0 for sed-only case
+  // (nudge shows only non-zero categories, so 读 shouldn't appear if sed-i goes to write)
+  assert.ok(
+    !out.additionalContext.includes("读 8") && !out.additionalContext.includes("8次读"),
+    "修复2: sed -i 不应被错误归类为读"
+  );
+});
+
+// ── NEW: Fix 3 — BASH_WRITE_RE covers generic redirect ──────────────────────
+
+test("修复3: 'node script.js > out.txt' 归写类", () => {
+  // Generic command with output redirect should count as write-class.
+  const lines = bashTurns(8, "node script.js > out.txt", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "修复3: node script.js > out.txt ×8 必须触发 bash nudge（归写类）");
+  assert.match(out.additionalContext, /委派检查/);
+});
+
+test("修复3: 'jq . a.json > b.json' 归写类", () => {
+  const lines = bashTurns(8, "jq . a.json > b.json", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "修复3: jq 重定向写文件 ×8 必须触发 bash nudge");
+  assert.match(out.additionalContext, /委派检查/);
+});
+
+// ── NEW: Fix 4 — node test regex anchored to filename boundary ───────────────
+
+test("修复4: node contest.mjs ×8 不触发测试类（误判修复）", () => {
+  // 'contest.mjs' contains 'test' as substring but is NOT a test file.
+  const lines = bashTurns(8, "node contest.mjs", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  const out = parseOutput(r.stdout);
+  // With fix: contest.mjs is not test-class, so 8 non-classified Bash calls → no nudge
+  assert.equal(out, null, "修复4: node contest.mjs 不应被误判为测试类，8次不触发nudge");
+});
+
+test("修复4: node inspect-config.mjs ×8 不触发测试类", () => {
+  const lines = bashTurns(8, "node inspect-config.mjs", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  const out = parseOutput(r.stdout);
+  assert.equal(out, null, "修复4: node inspect-config.mjs 不应被误判为测试类");
+});
+
+test("修复4: node foo.test.mjs ×8 正常触发测试类", () => {
+  const lines = bashTurns(8, "node foo.test.mjs", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "修复4: node foo.test.mjs 应归测试类，8次应触发nudge");
+  assert.match(out.additionalContext, /委派检查/);
+});
+
+test("修复4: node bar.spec.ts ×8 正常触发测试类", () => {
+  const lines = bashTurns(8, "node bar.spec.ts", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "修复4: node bar.spec.ts 应归测试类，8次应触发nudge");
+  assert.match(out.additionalContext, /委派检查/);
+});
+
+// ── P2修复A: 复合命令不被轻量前缀豁免 ─────────────────────────────────────────
+
+test("P2修复A: ls && rg TODO src ×8 触发读类（复合命令不被ls前缀豁免）", () => {
+  // Bug: BASH_LIGHT_RE matches 'ls' prefix → whole compound skipped → rg not counted.
+  // Fix: commands with && are not exempt from light-class bypass.
+  const lines = bashTurns(8, "ls && rg TODO src", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "P2修复A: ls && rg TODO src ×8 应触发nudge（rg是读类，不被ls前缀豁免）");
+  assert.match(out.additionalContext, /委派检查/);
+});
+
+test("P2修复A: git status; npm test ×8 触发测试类（分号复合不被git前缀豁免）", () => {
+  const lines = bashTurns(8, "git status; npm test", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "P2修复A: git status; npm test ×8 应触发nudge（npm test是测试类）");
+  assert.match(out.additionalContext, /委派检查/);
+});
+
+test("P2修复A: 纯 ls -la ×8 仍不触发（单条轻量命令豁免未被误伤）", () => {
+  const lines = bashTurns(8, "ls -la", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  const out = parseOutput(r.stdout);
+  // 8 pure lightweight Bash: not read/test/write → no bash nudge (count stays 0)
+  if (out !== null) {
+    const isBashnudge = out.additionalContext.includes("epoch") && out.additionalContext.includes("Bash");
+    assert.equal(isBashnudge, false, "P2修复A: 纯ls不应触发bash nudge");
+  }
+});
+
+// ── P2修复B: stderr重定向不算写类 ──────────────────────────────────────────────
+
+test("P2修复B: npm test 2>&1 ×8 归测试类不是写类", () => {
+  // Bug: BASH_WRITE_RE '>{1,2}\s*\S' matches '2>&1' → counted as write, nudge says 写 N 次.
+  // Fix: '>&1', '>&2', '2>&1', '>/dev/null', '2>/dev/null' excluded from write.
+  const lines = bashTurns(8, "npm test 2>&1", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "P2修复B: npm test 2>&1 ×8 应触发nudge（测试类）");
+  assert.match(out.additionalContext, /委派检查/);
+  // Must mention test (测) count — it's a test command
+  assert.match(out.additionalContext, /自己测\s*\d/, "P2修复B: nudge应提及测试次数（自己测 N 次）");
+  // Must NOT mention "写 N 次" in the breakdown (the '写派 implementer' fixed text is OK,
+  // but 'Bash 自己写 N 次' or '写 N 次' as a count should NOT appear).
+  assert.ok(
+    !out.additionalContext.match(/自己写\s*\d|\d\s*次.*写类|写\s+\d+\s*次/),
+    "P2修复B: npm test 2>&1 不应归写类，nudge文本不应包含写类计数"
+  );
+});
+
+test("P2修复B: rg foo 2>/dev/null ×8 归读类不是写类", () => {
+  const lines = bashTurns(8, "rg foo src 2>/dev/null", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "P2修复B: rg foo 2>/dev/null ×8 应触发nudge（读类）");
+  assert.match(out.additionalContext, /委派检查/);
+  // Must mention read (读) count — it's a read command
+  assert.match(out.additionalContext, /自己读\s*\d/, "P2修复B: nudge应提及读类次数（自己读 N 次）");
+  // Must NOT show write count (写类计数) in breakdown
+  assert.ok(
+    !out.additionalContext.match(/自己写\s*\d|\d\s*次.*写类|写\s+\d+\s*次/),
+    "P2修复B: rg 2>/dev/null 不应归写类，nudge文本不应包含写类计数"
+  );
+});
+
+test("P2修复B: node x.js > out.txt ×8 仍归写类（真实文件写不误排）", () => {
+  const lines = bashTurns(8, "node x.js > out.txt", 0);
+  const tp = writeTranscript(lines);
+  const r = runHook(tp);
+  assert.equal(r.status, 0);
+  assertNoBlockOutput(r);
+  const out = parseOutput(r.stdout);
+  assert.ok(out !== null, "P2修复B: node x.js > out.txt ×8 仍应触发nudge（写类）");
+  assert.match(out.additionalContext, /委派检查/);
+  assert.match(out.additionalContext, /写.*[1-9]|[1-9].*写/, "P2修复B: 真实文件重定向应归写类");
+});
