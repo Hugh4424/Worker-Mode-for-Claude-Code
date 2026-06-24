@@ -84,6 +84,27 @@ function isAllowedWritePath(filePath) {
   return hasDocExt(filePath) && DISPATCH_OUTPUT_KEYWORD_RE.test(filePath);
 }
 
+// ── Stderr-redirect stripping ─────────────────────────────────────────────────
+// Strip from a command string all redirect tokens that do NOT write a real file:
+//   - N>&M   fd duplication: 2>&1, 1>&2, etc.          → remove entirely
+//   - N>/dev/...  fd to device: 2>/dev/null             → remove entirely
+//   - &>/dev/...  combined redirect to device: &>/dev/null → remove entirely
+//   - N>>/dev/... append to device                      → remove entirely
+// After stripping, any remaining > or >> represents a genuine file write.
+// This is done with string replacement before further analysis.
+function stripNonWritingRedirects(cmd) {
+  // Order matters: handle longer/more-specific patterns first.
+  return cmd
+    // N>&M  (fd dup, e.g. 2>&1, 1>&2) — remove the token
+    .replace(/\d+>&\d+/g, "")
+    // &>/dev/...  (bash combined redirect to device)
+    .replace(/&>>\s*\/dev\/\S*/g, "")
+    .replace(/&>\s*\/dev\/\S*/g, "")
+    // N>>/dev/...  or N>/dev/...  (fd redirect to device)
+    .replace(/\d*>>\s*\/dev\/\S*/g, "")
+    .replace(/\d*>\s*\/dev\/\S*/g, "");
+}
+
 // ── Bash: dangerous-structure detection (must come BEFORE light-allowlist) ────
 // Any of these structures means the command can write/execute and must NOT be
 // short-circuited by the light allowlist.
@@ -138,7 +159,9 @@ const BASH_WRITE_PATTERNS = [
 ];
 
 function bashWritesToFile(cmd) {
-  return BASH_WRITE_PATTERNS.some((re) => re.test(cmd));
+  // Strip stderr/fd/device redirects before checking — they are not real writes.
+  const stripped = stripNonWritingRedirects(cmd);
+  return BASH_WRITE_PATTERNS.some((re) => re.test(stripped));
 }
 
 // ── Bash test-runner detection ─────────────────────────────────────────────────
@@ -165,15 +188,19 @@ function bashIsTest(cmd) {
 
 // ── Try to extract write-target path from a bash command ──────────────────────
 // Best-effort; used to check escape valve for Bash writes.
+// Returns the write target path, or null if none found.
+// Device files (/dev/*) are returned as-is so the caller can allow them.
 function extractWriteTarget(cmd) {
+  // Strip non-writing redirects first so they don't produce false targets.
+  const stripped = stripNonWritingRedirects(cmd);
   // tee target: ... | tee <path>
-  const teeM = cmd.match(/\|\s*tee\s+(\S+)/);
+  const teeM = stripped.match(/\|\s*tee\s+(\S+)/);
   if (teeM) return teeM[1];
   // >| (clobber redirect): ... >| <path>
-  const clobberM = cmd.match(/>\|\s*(\S+)/);
+  const clobberM = stripped.match(/>\|\s*(\S+)/);
   if (clobberM) return clobberM[1];
   // redirect: ... > path or ... >> path (take the last one found)
-  const redirMatches = [...cmd.matchAll(/\d*>>?\s*(\S+)/g)];
+  const redirMatches = [...stripped.matchAll(/\d*>>?\s*(\S+)/g)];
   if (redirMatches.length > 0) return redirMatches[redirMatches.length - 1][1];
   return null;
 }
@@ -237,6 +264,8 @@ try {
     if (bashWritesToFile(cmd)) {
       // Escape valve: if we can extract the write target, check whitelist.
       const target = extractWriteTarget(cmd);
+      // Writing to a device file (/dev/null, /dev/stdout, etc.) is a no-op write.
+      if (target && target.startsWith("/dev/")) allow();
       if (target && isAllowedWritePath(target)) allow();
       deny(DENY_WRITE);
     }

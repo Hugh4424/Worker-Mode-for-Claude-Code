@@ -489,3 +489,53 @@ test("Bash 'cat data >| logs/state.md' → allow (>| clobber to dispatch-output,
   const r = runHook(payload);
   assert.ok(isAllow(r), `expected allow: >| to state path triggers escape valve, got: ${JSON.stringify(r.parsed)}`);
 });
+
+// ── stderr redirect / /dev/null false-positive fixes ─────────────────────────
+
+test("Bash 'wc -l /a/state.json 2>/dev/null' → allow (stderr redirect, pure read)", () => {
+  const payload = { tool_name: "Bash", tool_input: { command: "wc -l /a/state.json 2>/dev/null" } };
+  const r = runHook(payload);
+  assert.ok(isAllow(r), `expected allow, got: ${JSON.stringify(r.parsed)}`);
+});
+
+test("Bash 'cat foo.md 2>/dev/null' → allow (stderr redirect, pure read)", () => {
+  const payload = { tool_name: "Bash", tool_input: { command: "cat foo.md 2>/dev/null" } };
+  const r = runHook(payload);
+  assert.ok(isAllow(r), `expected allow, got: ${JSON.stringify(r.parsed)}`);
+});
+
+test("Bash 'grep x foo 2>&1' → allow (fd dup, pure read)", () => {
+  const payload = { tool_name: "Bash", tool_input: { command: "grep x foo 2>&1" } };
+  const r = runHook(payload);
+  assert.ok(isAllow(r), `expected allow, got: ${JSON.stringify(r.parsed)}`);
+});
+
+test("Bash 'ls -la 2>/dev/null' → allow (stderr to /dev/null, pure read)", () => {
+  const payload = { tool_name: "Bash", tool_input: { command: "ls -la 2>/dev/null" } };
+  const r = runHook(payload);
+  assert.ok(isAllow(r), `expected allow, got: ${JSON.stringify(r.parsed)}`);
+});
+
+test("Bash 'find . -name x 2>/dev/null' → allow (stderr redirect, pure read)", () => {
+  const payload = { tool_name: "Bash", tool_input: { command: "find . -name x 2>/dev/null" } };
+  const r = runHook(payload);
+  assert.ok(isAllow(r), `expected allow, got: ${JSON.stringify(r.parsed)}`);
+});
+
+test("Bash 'cat a 2>/dev/null > foo.ts' → deny (stdout writes code file despite stderr redirect)", () => {
+  const payload = { tool_name: "Bash", tool_input: { command: "cat a 2>/dev/null > foo.ts" } };
+  const r = runHook(payload);
+  assert.ok(isDeny(r), `expected deny, got: ${JSON.stringify(r.parsed)}`);
+});
+
+test("Bash 'echo x > /dev/null' → allow (write to device file = no-op)", () => {
+  const payload = { tool_name: "Bash", tool_input: { command: "echo x > /dev/null" } };
+  const r = runHook(payload);
+  assert.ok(isAllow(r), `expected allow for /dev/null target, got: ${JSON.stringify(r.parsed)}`);
+});
+
+test("Bash 'node x.js 2>/dev/null' → allow (run script with stderr redirect, not node -e)", () => {
+  const payload = { tool_name: "Bash", tool_input: { command: "node x.js 2>/dev/null" } };
+  const r = runHook(payload);
+  assert.ok(isAllow(r), `expected allow for node script with stderr redirect, got: ${JSON.stringify(r.parsed)}`);
+});
