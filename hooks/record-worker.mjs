@@ -147,21 +147,12 @@ const subagentType = hookData.agent_type || "unknown";
 const hookCwd = hookData.cwd || "";
 
 // ── dispatch_id: idempotency key (FR-REC-005) ────────────────────────────────
-// In CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 mode the same SubagentStop event can
-// be delivered to multiple processes, causing this script to run twice and append
-// a duplicate record. We guard with a dispatch_id (toolUseId from the sibling
-// meta.json, or the agent transcript filename as fallback) checked against the
-// existing log before writing.
-//
-// Concurrency note: the check-then-write is NOT atomic at the OS level. Two
-// processes can both observe "not yet present" and both proceed to write. The
-// resulting duplicate is then deduplicated on next read (same dispatch_id). In
-// practice the window is sub-millisecond for the same file descriptor, and
-// O_APPEND ensures lines are not interleaved. A lock-file (O_EXCL) could close
-// the window entirely but adds complexity that is not warranted for this low-rate
-// hook; the post-read dedup path is the correct consumer-side contract.
-// TODO: if duplicate rate rises in future multi-agent modes, add an O_EXCL
-// lockfile (workerLogPath + ".lock") around the read-check-write block.
+// AGENT_TEAMS=1 mode can deliver the same SubagentStop to multiple processes.
+// We guard with a dispatch_id (toolUseId from sibling meta.json, or transcript
+// filename fallback) checked against the log before writing.
+// Concurrency: check-then-write is NOT atomic; rare duplicates are deduplicated
+// on next read (same dispatch_id). O_APPEND keeps lines non-interleaved.
+// TODO: if duplicate rate rises, add O_EXCL lockfile around read-check-write.
 
 // Read dispatch_id early (before any transcript processing) so we can bail fast.
 function computeDispatchId(agentTranscriptPath) {
@@ -240,14 +231,9 @@ for (const l of orchDeduped) {
 }
 
 // orchestrator_action_count: count DISTINCT tool_use blocks across ALL (pre-dedup)
-// assistant messages. Claude Code splits one assistant turn across multiple JSONL
-// lines sharing a message.id (text in one line, tool_use in a sibling line), so
-// counting over orchDeduped (kept first line per message.id) would discard the
-// tool_use sibling and undercount. We therefore scan every line. But scanning
-// raw lines could overcount if the same tool_use block were ever echoed across
-// multiple lines, so we dedupe by each tool_use's own `id` (toolu_...). Blocks
-// without an id fall back to counting each occurrence. Token sums stay on the
-// deduped set (usage is redundant across the split); only this count scans all.
+// assistant messages. CC splits one turn across multiple lines sharing message.id
+// (text line + tool_use sibling), so counting orchDeduped would undercount.
+// We scan all lines and dedup by block.id (toolu_...); blocks without id each count once.
 const seenToolUseIds = new Set();
 let orchestratorActionCount = 0;
 for (const l of orchAssistantMsgs) {
@@ -271,22 +257,11 @@ if (orchAssistantMsgs.length > 0) {
   orchestratorContextSize = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0);
 }
 
-// dispatch_input_tokens (FR-REC-002, plan L91, metric ⑤): the FULL input context
-// cost (input_tokens + cache_read_input_tokens + cache_creation_input_tokens) on the
-// orchestrator assistant message that dispatched THIS SPECIFIC worker via a tool_use
-// with name "Agent". A session may contain multiple/parallel Agent dispatches, so we
-// must NOT take "the last Agent dispatch" — that would misattribute another worker's
-// (or another turn's) cost as this worker's, fabricating false per-worker data.
-//
-// The reliable join key (verified against real CC transcripts, T013a): the subagent
-// transcript at agent_transcript_path (subagents/agent-XXX.jsonl) has a SIBLING
-// agent-XXX.meta.json carrying { toolUseId } — the exact id of the Agent tool_use
-// block that created this worker. We read that toolUseId, find the orchestrator
-// assistant message whose content has a tool_use{name:"Agent", id===toolUseId}, and
-// record THAT message's full input context (the three usage fields summed; bare
-// input_tokens alone is a cache-miss crumb, commonly 2). If the meta is absent/unparseable,
-// carries no toolUseId, or no matching dispatch exists, record null (NOT 0, NOT the last
-// dispatch's value) — missing-data must stay distinguishable and never misattributed.
+// dispatch_input_tokens (FR-REC-002, metric ⑤): FULL input context cost
+// (input_tokens + cache_read + cache_creation) of the orchestrator message that
+// dispatched THIS worker. Join key = toolUseId from sibling meta.json (do NOT
+// use "the last Agent dispatch" — that misattributes parallel workers).
+// If meta absent, unreadable, or no match → null (not 0; missing ≠ zero).
 function readDispatchToolUseId(subTranscriptPath) {
   const metaPath = subTranscriptPath.replace(/\.jsonl$/, ".meta.json");
   try {
@@ -307,12 +282,8 @@ if (dispatchToolUseId) {
       content.some((b) => b && b.type === "tool_use" && b.name === "Agent" && b.id === dispatchToolUseId);
     if (!matches) continue;
     const u = l.message.usage || {};
-    // The real dispatch context cost is the FULL input the dispatching message
-    // carried, not the bare input_tokens. In Claude Code the dispatching turn
-    // almost always hits the prompt cache, so input_tokens is a tiny remainder
-    // (commonly 2) while the actual context sits in cache_read_input_tokens
-    // (tens/hundreds of thousands) + cache_creation_input_tokens. Sum all three
-    // so dispatch_input_tokens reflects context cost, not the uncached crumb.
+    // Sum all three fields: bare input_tokens is a tiny cache-miss crumb (commonly 2);
+    // actual context sits in cache_read + cache_creation. Sum = real dispatch cost.
     const inTok = typeof u.input_tokens === "number" ? u.input_tokens : 0;
     const cacheRead = typeof u.cache_read_input_tokens === "number" ? u.cache_read_input_tokens : 0;
     const cacheCreate = typeof u.cache_creation_input_tokens === "number" ? u.cache_creation_input_tokens : 0;
@@ -355,18 +326,12 @@ for (const l of subDeduped) {
   workerTokens += (u.input_tokens || 0) + (u.output_tokens || 0);
 }
 
-// summary_return_tokens (FR-REC-002, plan L92, metric ⑤): the ORCHESTRATOR-SIDE
-// tool_result token cost — the tokens the returned summary added back into the
-// orchestrator context. This is NOT the subagent's own output_tokens (a different
-// quantity; using it would misreport the worker's internal output as orchestrator
-// cost — the original bug). Verified against real CC transcripts (T013a): the
-// orchestrator tool_result content-block carries only {content,is_error,tool_use_id,
-// type} with NO token field, and the only token-bearing field on the Agent result
-// (toolUseResult.usage / totalTokens) is the subagent's OWN aggregate self-usage,
-// which is precisely the forbidden fallback. The orchestrator-side tool_result token
-// is therefore not a recorded field and cannot be extracted → record null (NOT 0,
-// NOT the subagent output_tokens). null = missing-data is correct here. If a future
-// transcript format exposes this token, this is the single place to parse it.
+// summary_return_tokens (FR-REC-002, metric ⑤): tokens the worker's summary added
+// to the orchestrator context. NOT the worker's own output_tokens (different metric;
+// original bug used that, misreporting internal output as orchestrator cost).
+// CC transcripts (T013a): tool_result block has no token field; only token field on
+// Agent result is subagent's own self-usage — wrong. → null until transcript format
+// exposes this field. null = missing; NOT 0, NOT subagent output_tokens.
 const summaryReturnTokens = null;
 
 // model: from the first subagent assistant message that has a model field

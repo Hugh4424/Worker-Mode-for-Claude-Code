@@ -23,18 +23,6 @@
           }
         ]
       }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Bash|Read|Grep|Glob|Edit|Write|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/nudge-delegation.mjs\"",
-            "timeout": 5
-          }
-        ]
-      }
     ]
   }
 }
