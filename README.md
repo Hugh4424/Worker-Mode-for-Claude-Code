@@ -142,8 +142,8 @@ Two post-hoc CLIs — one-shot, never resident, zero overhead during tasks.
 node tools/check-metrics.mjs --log $WORKER_LOG_PATH
 
 # What the foreman carried itself that it should have dispatched
-# transcript.jsonl = Claude Code session file, found at ~/.claude/projects/<project>/
-node tools/check-context-health.mjs <transcript.jsonl>
+# transcript.jsonl = Claude Code session file, found at ~/.claude/projects/{project}/
+node tools/check-context-health.mjs {transcript.jsonl}
 ```
 
 `check-metrics` shows what went **out**. `check-context-health` shows what **stayed in** — reads the foreman did itself that it could have delegated. Together they tell the full story.

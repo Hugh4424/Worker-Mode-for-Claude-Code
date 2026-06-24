@@ -142,8 +142,8 @@ bash scripts/setup-delegation-workers.sh
 node tools/check-metrics.mjs --log $WORKER_LOG_PATH
 
 # 工头自己扛了多少本该派出去的活（读主会话转录）
-# 转录文件在 ~/.claude/projects/<项目>/ 目录下
-node tools/check-context-health.mjs <主会话转录.jsonl>
+# 转录文件在 ~/.claude/projects/{项目}/ 目录下
+node tools/check-context-health.mjs {主会话转录.jsonl}
 ```
 
 `check-metrics` 看**派出去的**，`check-context-health` 看**留下来的**——工头自己扛的、本可委派的读量。两个合起来才是全貌。

@@ -22,8 +22,8 @@ tools: Read, Grep, Glob, Bash
 
 **回报格式（回传主会话的内容）：**
 ```
-审查对象：<文件或产物描述>
+审查对象：{文件或产物描述}
 Findings：
-  - [blocking|note] <描述>（位置：path:line，影响：<简述>，建议：<修复方式>）
-Verdict：<pass / pass-with-notes / fail>
+  - [blocking|note] {描述}（位置：path:line，影响：{简述}，建议：{修复方式}）
+Verdict：[pass / pass-with-notes / fail]
 ```
