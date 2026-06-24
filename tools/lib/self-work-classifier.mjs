@@ -1,12 +1,15 @@
 // self-work-classifier.mjs — shared "foreman self-read / delegatable" classifier.
-// Extracted from check-context-health.mjs so Layer A (PostToolUse hook) and the
-// retrospective health check can share identical thresholds and classification logic
-// without duplicating constants.
+// Consumed by check-context-health.mjs (retrospective health check). The two-layer
+// API is kept split so both a single-call judgment and a full-session aggregation
+// can share identical thresholds and classification logic without duplicating constants.
+// (Historical note: Layer 1 was also designed to be callable from a PostToolUse hook;
+// that nudge hook has since been removed, so the only live consumer now is the
+// retrospective health check. Layer 1 remains pure/stateless and hook-safe by design.)
 //
 // Two-layer API (hard requirement — do not merge into one function):
 //   Layer 1 — isBigSelfChunk({ toolUse, result })
 //     Pure single-call judgment: is THIS one tool invocation a big self-chunk?
-//     No cross-turn state; safe to call from a PostToolUse hook with only local data.
+//     No cross-turn state; only local data needed.
 //
 //   Layer 2 — aggregateDelegatable({ toolUses, mutatedFiles })
 //     Full-session aggregation: which big reads were likely delegatable?
