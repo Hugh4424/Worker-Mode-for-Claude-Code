@@ -1,6 +1,9 @@
 # Development process docs — internal only
 docs/
 
+# Spool files (may contain key material / source snippets — never commit)
+.worker-mode/
+
 # Node
 node_modules/
 

@@ -1,0 +1,25 @@
+{
+  "_schema": "worker-mode/state-current/v1",
+  "stage": "STAGE_NAME",
+  "progress": "一句话描述当前进度，或 0–100% 数字字符串",
+  "next_steps": [
+    "下一步 1：{分配给哪个 worker / 做什么}",
+    "下一步 2：{可并行的第二件事}"
+  ],
+  "path_map": {
+    "仓库根": "/absolute/path/to/repo",
+    "核心逻辑": "src/core.ts",
+    "测试": "src/__tests__/",
+    "配置": "config/settings.json",
+    "state 目录": ".worker-mode/state/",
+    "artifacts 索引": ".worker-mode/state/artifacts.jsonl",
+    "findings 详情目录": ".worker-mode/state/findings/"
+  },
+  "open_risks": [
+    "风险1：{描述} — 缓解：{策略}",
+    "风险2：{描述} — 缓解：{策略}"
+  ],
+  "verification_status": "not_run",
+  "updated_at": "2026-01-01T00:00:00Z",
+  "findings_index": ".worker-mode/state/artifacts.jsonl"
+}
