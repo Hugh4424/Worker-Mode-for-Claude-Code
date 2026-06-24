@@ -18,6 +18,14 @@ tools: Read, Grep, Glob, Bash
 - 只产出真实 finding，不为凑数而造问题。
 - 完整内容留在自己上下文，只把 finding 列表和 verdict 传回主会话。
 - **降本契约（summary-only，硬约束）：** 回报时只回结构化摘要，绝不把大段被审原文倒回主会话；finding 定位一律用文件引用（`path:line` 这种 path 引用）代替原文转贴，让主会话上下文保持轻量。
+- **存档型审查日志落盘（抗压缩失忆）：** 对**当前轮次工头用不到、属于备查/审计/跨阶段引用**的详细审查日志（如完整逐行审查记录、大量 note 级 finding 明细），不要大段回报给工头，而是用 record-artifact.mjs 落盘，回报时只给一句话结论 + artifact id：
+  ```bash
+  cat <<'EOF' | node tools/record-artifact.mjs --id <stage>-reviewer-<seq> --stage <阶段> --status <done|partial|failed> --summary '<一句话结论>'
+  <详情正文>
+  EOF
+  ```
+  落盘后回报工头：'已落盘 artifact <id>，结论：<一句话>'。
+  判别：详情**下一步工头就要用**→直接摘要回报（不落盘，避免多往返）；详情**只是备查/存档/跨阶段**→落盘回指针。拿不准默认直接回报。
 - verdict 只有三种：`pass`（无阻断性问题）、`pass-with-notes`（有建议但不阻断）、`fail`（有阻断性问题必须修复）。
 
 **回报格式（回传主会话的内容）：**

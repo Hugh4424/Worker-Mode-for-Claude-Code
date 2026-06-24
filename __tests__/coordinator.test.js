@@ -29,7 +29,11 @@ test("coordinator.md exists", () => {
   assert.ok(existsSync(coordinatorPath), "agents/coordinator.md must exist");
 });
 
-test("frontmatter declares a wildcard Agent with full tools (not a fixed worker list)", () => {
+test("frontmatter is tool-stripped: no Write/Edit/MultiEdit, retains Task+dispatch capability", () => {
+  // Tool-stripped design: coordinator physically lacks Write/Edit/MultiEdit so it
+  // cannot author code itself — authoring must be delegated to workers.
+  // It retains Task (subagent dispatch) + read/inspect tools for the red-line work
+  // only the foreman must do (read state, run gate scripts, etc.).
   const raw = readFileSync(coordinatorPath, "utf8");
   const { frontmatter } = splitFrontmatter(raw);
 
@@ -37,15 +41,19 @@ test("frontmatter declares a wildcard Agent with full tools (not a fixed worker 
   assert.match(frontmatter, /^name:\s*coordinator\s*$/m, "frontmatter must name the agent 'coordinator'");
   assert.match(frontmatter, /^tools:/m, "frontmatter must declare a tools field");
 
-  // Positive: tools must express wildcard Agent capability. Removing the
-  // wildcard '*' (e.g. swapping it for a fixed list) makes this go RED.
   const toolsLine = frontmatter.match(/^tools:\s*(.+)$/m);
   assert.ok(toolsLine, "tools field must be present and inline");
-  assert.match(toolsLine[1], /\*/, "tools must express wildcard (full) tool access via '*'");
 
-  // The Agent (subagent dispatch) capability must be present — a foreman that
-  // cannot dispatch is not a foreman. Pin the literal so dropping it goes RED.
-  assert.ok(frontmatter.includes("Agent"), "frontmatter must grant the Agent (subagent dispatch) capability");
+  // Positive: Task (subagent dispatch) must be present — a foreman that cannot
+  // dispatch is not a foreman. Pin the literal so dropping it goes RED.
+  assert.ok(toolsLine[1].includes("Task"), "tools must include Task (subagent dispatch capability)");
+
+  // Negative: Write/Edit/MultiEdit must NOT be present — tool-stripped design.
+  // Match quoted form (e.g. "Write") to avoid false positives from TodoWrite/WebFetch.
+  // Each pinned by literal so restoring any one of them goes RED.
+  assert.ok(!/"Write"/.test(toolsLine[1]), 'tools must NOT include "Write" (tool-stripped: authoring delegated)');
+  assert.ok(!/"Edit"/.test(toolsLine[1]), 'tools must NOT include "Edit" (tool-stripped: authoring delegated)');
+  assert.ok(!/"MultiEdit"/.test(toolsLine[1]), 'tools must NOT include "MultiEdit" (tool-stripped: authoring delegated)');
 
   // Negative: the tools field must NOT hardcode the 6 worker names as its set.
   // Asserted per-name with literals so adding any one of them goes RED.

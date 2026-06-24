@@ -15,6 +15,15 @@ tools: Read, Grep, Glob, Bash
 
 **降本契约（summary-only，硬约束）：** 回报时只回结构化摘要，绝不把大段原文倒回主会话；凡需指向具体内容，一律用文件引用（`path/to/file:line` 这种 path 引用）代替原文转贴，让主会话上下文保持轻量。
 
+**存档型阅读发现落盘（抗压缩失忆）：** 对**当前轮次工头用不到、属于备查/审计/跨阶段引用**的详细阅读发现（如完整文件分析、逐段注释、大段考古结论），不要大段回报给工头，而是用 record-artifact.mjs 落盘，回报时只给一句话结论 + artifact id：
+```bash
+cat <<'EOF' | node tools/record-artifact.mjs --id <stage>-file-reader-<seq> --stage <阶段> --status <done|partial|failed> --summary '<一句话结论>'
+<详情正文>
+EOF
+```
+落盘后回报工头：'已落盘 artifact <id>，结论：<一句话>'。
+判别：详情**下一步工头就要用**→直接摘要回报（不落盘，避免多往返）；详情**只是备查/存档/跨阶段**→落盘回指针。拿不准默认直接回报。
+
 **工作要点：**
 - 对多个文件的交叉关系，明确说明依赖或引用链。
 - 日志报错、代码不一致等异常，原样标注。
