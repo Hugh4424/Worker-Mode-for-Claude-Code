@@ -1,18 +1,6 @@
 {
-  "description": "Worker-Mode delegation hooks. (1) PreToolUse force-delegate: a default hard-gate that DENIES the orchestrator's own write/test-class tool calls (Write/Edit/MultiEdit of code/spec, write/test-class Bash) and returns guidance to delegate to a subagent; it ALLOWS delegation (Task/Agent), reads, light scheduling Bash, and writes to scheduling outputs (paths with state/status/progress/journal/handoff/decision). Subagents' own calls pass (detected via agent_id). Set WORKER_FORCE_DELEGATE=off to disable; the hook fails open on any internal error. (2) SubagentStop record-worker: pure observer, appends one JSONL record per worker. (3) SessionStart check-config: non-blocking WORKER_LOG_PATH reminder. The fail-loud hard stop for a missing log path lives in record-worker.mjs.",
+  "description": "Worker-Mode delegation hooks. Delegation enforcement is NOT done here — it is done structurally via tool-stripping the orchestrator (settings.json `agent: coordinator` + coordinator.md tools allowlist with no Write/Edit/Bash), which proved more robust than the removed PreToolUse deny-hook (force-delegate, which mis-fired on stderr redirects, git commit messages, etc.). Remaining hooks are observers/reminders only: (1) SubagentStop record-worker: pure observer, appends one JSONL record per worker. (2) SessionStart check-config: non-blocking WORKER_LOG_PATH reminder. The fail-loud hard stop for a missing log path lives in record-worker.mjs.",
   "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Write|Edit|MultiEdit|Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/force-delegate.mjs\"",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
     "SessionStart": [
       {
         "hooks": [
