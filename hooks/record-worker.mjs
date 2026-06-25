@@ -143,6 +143,9 @@ const lastMsg = hookData.last_assistant_message || "";
 // (the dispatched agent's frontmatter name). Sentinel "unknown" when absent so a
 // missing type is a legal recorded state, never an empty/missing field.
 const subagentType = hookData.agent_type || "unknown";
+// backend: "omc" if subagent_type starts with "oh-my-claudecode:", else "legacy".
+// Use startsWith (not includes) to avoid spoofed names like "evil:oh-my-claudecode:x".
+const backend = (subagentType || "").startsWith("oh-my-claudecode:") ? "omc" : "legacy";
 // cwd is the orchestrator working directory — used to run the version-diff source.
 const hookCwd = hookData.cwd || "";
 
@@ -223,11 +226,11 @@ for (const l of orchAssistantMsgs) {
   }
 }
 
-// orchestrator_tokens: sum of (input + output) per unique message
+// orchestrator_tokens: sum of (input + output + cache_read + cache_creation) per unique message
 let orchestratorTokens = 0;
 for (const l of orchDeduped) {
   const u = l.message.usage || {};
-  orchestratorTokens += (u.input_tokens || 0) + (u.output_tokens || 0);
+  orchestratorTokens += (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
 }
 
 // orchestrator_action_count: count DISTINCT tool_use blocks across ALL (pre-dedup)
@@ -279,7 +282,7 @@ if (dispatchToolUseId) {
   for (const l of orchAssistantMsgs) {
     const content = (l.message && l.message.content) || [];
     const matches = Array.isArray(content) &&
-      content.some((b) => b && b.type === "tool_use" && b.name === "Agent" && b.id === dispatchToolUseId);
+      content.some((b) => b && b.type === "tool_use" && (b.name === "Agent" || b.name === "Task") && b.id === dispatchToolUseId);
     if (!matches) continue;
     const u = l.message.usage || {};
     // Sum all three fields: bare input_tokens is a tiny cache-miss crumb (commonly 2);
@@ -319,11 +322,11 @@ for (const l of subAssistantMsgs) {
   }
 }
 
-// worker_tokens: sum of (input + output) per unique message
+// worker_tokens: sum of (input + output + cache_read + cache_creation) per unique message
 let workerTokens = 0;
 for (const l of subDeduped) {
   const u = l.message.usage || {};
-  workerTokens += (u.input_tokens || 0) + (u.output_tokens || 0);
+  workerTokens += (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
 }
 
 // summary_return_tokens (FR-REC-002, metric ⑤): tokens the worker's summary added
@@ -430,6 +433,7 @@ const partialRecord = {
   result: result || null,
   files,
   subagent_type: subagentType,
+  backend,
   dispatch_input_tokens: dispatchInputTokens,
   summary_return_tokens: summaryReturnTokens,
   conflict_marker: conflictMarker,
@@ -479,6 +483,7 @@ const record = {
   files,
   // Phase 3 additions (SIG-002 / FR-REC-002,003): null/"unknown" for missing data.
   subagent_type: subagentType,
+  backend,
   dispatch_input_tokens: dispatchInputTokens,
   summary_return_tokens: summaryReturnTokens,
   conflict_marker: conflictMarker,
@@ -486,6 +491,13 @@ const record = {
   // transcript filename as fallback. Used by duplicate-suppression check above
   // and by consumers to deduplicate when Agent Teams delivers the event twice.
   dispatch_id: dispatchId,
+  // status: "ok" | "incomplete" (incomplete written by writeIncomplete above).
+  // "failed" state is NOT implemented here: SubagentStop hookData carries no
+  // reliable failure signal (no is_error, no stop_reason, no result.error field
+  // exposed in this hook event). Adding a failed branch without a signal source
+  // would produce false negatives (succeeded agents mis-labeled failed) and pollute
+  // monitoring. PONYTAIL: implement failed + omc-failure.marker once SubagentStop
+  // exposes a reliable failure field (e.g. hookData.is_error or hookData.exit_code).
   status: "ok",
   ts: new Date().toISOString(),
 };

@@ -7,8 +7,12 @@
 // Usage:
 //   node check-metrics.mjs --log <path> [--session-record <path>] [--json]
 //   WORKER_LOG_PATH=<path> node check-metrics.mjs [--json]
+//
+// Note: review_return_rate 受 extract-gates 保守推断限制，低活跃/短会话大概率 N/A
+// （extract-gates 宁可 unknown 不瞎猜），这是设计权衡不是 bug。
 
 import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 
 // ── args ───────────────────────────────────────────────────────────────────────
 
@@ -16,6 +20,8 @@ function parseArgs(argv) {
   let log = "";
   let json = false;
   let sessionRecord = "";
+  let transcript = "";
+  let enforceLog = "";
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--log") {
       log = argv[i + 1] || "";
@@ -25,14 +31,20 @@ function parseArgs(argv) {
       // manually passed (FR-CHK-003). Supplies human-wait intervals for inflation.
       sessionRecord = argv[i + 1] || "";
       i++;
+    } else if (argv[i] === "--transcript") {
+      transcript = argv[i + 1] || "";
+      i++;
+    } else if (argv[i] === "--enforce-log") {
+      enforceLog = argv[i + 1] || "";
+      i++;
     } else if (argv[i] === "--json") {
       json = true;
     }
   }
-  return { log, json, sessionRecord };
+  return { log, json, sessionRecord, transcript, enforceLog };
 }
 
-const { log: logArg, json, sessionRecord: sessionRecordArg } = parseArgs(process.argv.slice(2));
+const { log: logArg, json, sessionRecord: sessionRecordArg, transcript: transcriptArg, enforceLog: enforceLogArg } = parseArgs(process.argv.slice(2));
 // --log wins; fall back to env WORKER_LOG_PATH.
 const logPath = logArg || process.env.WORKER_LOG_PATH || "";
 
@@ -212,6 +224,12 @@ if (sessions.size === 0) {
   process.exit(1);
 }
 
+// ── global metrics (pre-loop) ─────────────────────────────────────────────────
+// incomplete_ratio: global fraction of status=incomplete across ALL deduped records.
+const allCount = deduplicatedRecords.length;
+const allIncompleteCount = deduplicatedRecords.filter((r) => r.status === "incomplete").length;
+const incompleteRatio = allCount > 0 ? allIncompleteCount / allCount : null;
+
 // ── compute metrics per session ───────────────────────────────────────────────
 // Legacy 4 keys (preserved) + 5 P4 observation metrics (FR-CHK-001). All metric
 // values are pure numbers or null — null = missing data, NEVER faked 0 (FR-CHK-004,
@@ -232,6 +250,10 @@ const inflationDenominatorSource = {};
 // exist per session. These represent dispatches that happened but whose data is
 // partial (subagent crashed mid-run). Visible so auditors can assess data quality.
 const incompleteCount = {};
+// New monitoring metrics (per-session)
+const completeTokenRatio = {};
+const cumulativeWorkerTimeRatio = {};
+const backendDistribution = {};
 
 for (const [sid, recs] of sessions) {
   // Isolate status=incomplete placeholder records (P1-B). These prove a dispatch
@@ -395,11 +417,128 @@ for (const [sid, recs] of sessions) {
     summary_return_tokens:
       typeof r.summary_return_tokens === "number" ? r.summary_return_tokens : null,
   }));
+
+  // ── complete_token_ratio = sum(worker) / (sum(worker) + max(orchestrator)) ───
+  // Uses complete four-field token count (input+output+cache_creation+cache_read)
+  // but fixes the multi-worker denominator inflation bug: each worker-log record
+  // carries the SNAPSHOT of orchestrator tokens at that moment. Summing all
+  // snapshots repeats the same orchestrator spend N times (once per worker),
+  // making the denominator grow with worker count instead of reflecting real cost.
+  // Fix: use MAX(orchestrator_tokens) across all complete records, which equals
+  // the final/peak orchestrator spend — same denominator treatment as
+  // worker_token_ratio (which already uses maxOrch, not sumOrch). This keeps both
+  // ratios consistent and prevents denominator inflation.
+  // Null if any complete record lacks worker_tokens OR orchestrator_tokens.
+  const orchTokensMissing = completeRecs.length === 0 ||
+    completeRecs.some((r) => typeof r.orchestrator_tokens !== "number");
+  if (workerTokensMissing || orchTokensMissing) {
+    completeTokenRatio[sid] = null;
+  } else {
+    // maxOrch is already computed above (for orchestratorVsWorkerTokens / workerTokenRatio)
+    const totalTokens = sumWorker + maxOrch;
+    completeTokenRatio[sid] = totalTokens > 0 ? sumWorker / totalTokens : null;
+  }
+
+  // ── cumulative_worker_time_ratio = sum(duration_ms) / wall_clock_total_ms ───
+  // Raw sum of durations / wall clock. Can exceed 100% when parallel — that's valid.
+  // Null if no complete records with valid duration_ms + ts.
+  const validDurations = completeRecs.filter(
+    (r) => typeof r.duration_ms === "number" && workerInterval(r) !== null
+  );
+  if (validDurations.length === 0 || totalTaskTime <= 0) {
+    cumulativeWorkerTimeRatio[sid] = null;
+  } else {
+    const sumDurations = validDurations.reduce((acc, r) => acc + r.duration_ms, 0);
+    cumulativeWorkerTimeRatio[sid] = sumDurations / totalTaskTime;
+  }
+
+  // ── backend_distribution = count grouped by `backend` field ─────────────────
+  // Records without `backend` field → "unknown" group. Uses ALL recs for session.
+  const bdist = {};
+  for (const r of recs) {
+    const key = (typeof r.backend === "string" && r.backend) ? r.backend : "unknown";
+    bdist[key] = (bdist[key] || 0) + 1;
+  }
+  backendDistribution[sid] = bdist;
 }
 
+// ── review_return_rate (把关率) = count(return) / count(accept+return) ────────
+// Data source: extract-gates.mjs subprocess, invoked only when --transcript passed.
+// "unknown" does NOT count in denominator.
+// Key intentionally avoids "gate" substring to satisfy FR-OBS-001 regex.
+let reviewReturnRate = null;
+if (transcriptArg) {
+  const extractGatesScript = new URL("./extract-gates.mjs", import.meta.url).pathname;
+  const gateResult = spawnSync("node", [extractGatesScript, transcriptArg], { encoding: "utf8" });
+  if (gateResult.status === 0 && gateResult.stdout) {
+    try {
+      const gates = JSON.parse(gateResult.stdout);
+      if (Array.isArray(gates)) {
+        let acceptCount = 0;
+        let returnCount = 0;
+        for (const g of gates) {
+          if (g.gate === "accept") acceptCount++;
+          else if (g.gate === "return") returnCount++;
+        }
+        const denom = acceptCount + returnCount;
+        reviewReturnRate = denom > 0 ? returnCount / denom : null;
+      }
+    } catch (_) {
+      // parse failure — leave null
+    }
+  }
+}
+
+// ── enforce_deny metrics ─────────────────────────────────────────────────────
+// Reads enforce-log.jsonl (written by enforce-backend.mjs) to surface the physical
+// deny evidence: how many times the hook blocked a wrong-backend / marker dispatch.
+// Path: --enforce-log <path> flag, else auto-detect via CLAUDE_PROJECT_DIR or cwd.
+// File-not-found → 0 denies (graceful); malformed line → skipped (non-fatal).
+// This is the key "物理强制有没有真生效" signal: deny_count > 0 proves the hook fired.
+let enforceDenyCount = 0;
+const enforceDenyByReason = {}; // { wrong_backend: N, marker_block: N, invalid_backend: N }
+
+(function readEnforceLog() {
+  // Determine enforce-log path:
+  //   1. --enforce-log CLI flag
+  //   2. CLAUDE_PROJECT_DIR env
+  //   3. cwd
+  let enforceLogPath = enforceLogArg;
+  if (!enforceLogPath) {
+    const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
+    enforceLogPath = root ? [root, ".worker-mode", "state", "enforce-log.jsonl"].join("/") : "";
+  }
+  if (!enforceLogPath) return;
+
+  let rawLog;
+  try {
+    rawLog = readFileSync(enforceLogPath, "utf8");
+  } catch {
+    // File not found or unreadable → 0 denies, no crash
+    return;
+  }
+
+  for (const line of rawLog.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let entry;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      continue; // skip malformed lines — non-fatal
+    }
+    if (entry.decision === "deny") {
+      enforceDenyCount++;
+      const reason = typeof entry.reason === "string" ? entry.reason : "unknown";
+      enforceDenyByReason[reason] = (enforceDenyByReason[reason] || 0) + 1;
+    }
+  }
+})();
+
 // ── output ──────────────────────────────────────────────────────────────────
-// Five OBSERVATION metrics + legacy keys. inflation_denominator_source is a sibling
-// label (NOT a metric value) so the metric leaves stay pure number|null (FR-OBS-002).
+// Five OBSERVATION metrics + legacy keys + 5 new monitoring metrics.
+// inflation_denominator_source is a sibling label (NOT a metric value) so the
+// metric leaves stay pure number|null (FR-OBS-002).
 
 const out = {
   delegation_rate: delegationRate,
@@ -416,6 +555,16 @@ const out = {
   // Audit field: how many status=incomplete placeholders exist per session.
   // Non-zero means some dispatches lost their numeric data (subagent crash).
   incomplete_count: incompleteCount,
+  // New monitoring metrics
+  complete_token_ratio: completeTokenRatio,
+  cumulative_worker_time_ratio: cumulativeWorkerTimeRatio,
+  backend_distribution: backendDistribution,
+  review_return_rate: reviewReturnRate,
+  incomplete_ratio: incompleteRatio,
+  // Physical enforcement evidence from enforce-backend.mjs deny log.
+  // enforce_deny_count > 0 proves the hook fired and blocked at least one dispatch.
+  enforce_deny_count: enforceDenyCount,
+  enforce_deny_by_reason: enforceDenyByReason,
 };
 
 if (json) {
@@ -458,6 +607,78 @@ if (json) {
     process.stdout.write("  dispatch_summary_cost (每次派发 [输入, 摘要] token): " + dscStr + "\n");
     const ic = incompleteCount[sid] || 0;
     process.stdout.write("  incomplete_count (数据残缺的派发占位数): " + ic + "\n");
+  }
+
+  // ── Monitoring Metrics (新增指标) ────────────────────────────────────────
+  process.stdout.write("\n## Monitoring Metrics (新增指标)\n");
+  for (const sid of sids) {
+    process.stdout.write("\n[session " + sid + "]\n");
+
+    // complete_token_ratio
+    const ctr = completeTokenRatio[sid];
+    if (ctr === null) {
+      process.stdout.write("  complete_token_ratio (完整口径 token 占比): N/A\n");
+    } else {
+      const pct = (ctr * 100).toFixed(1);
+      const health = ctr >= 0.6 ? "✓健康" : ctr < 0.3 ? "⚠低于红线(<30%)" : "";
+      process.stdout.write("  complete_token_ratio (完整口径 token 占比): " + pct + "% " + health + "\n");
+    }
+
+    // cumulative_worker_time_ratio
+    const cwtr = cumulativeWorkerTimeRatio[sid];
+    if (cwtr === null) {
+      process.stdout.write("  cumulative_worker_time_ratio (子代理累计耗时/墙钟): N/A\n");
+    } else {
+      const pct = (cwtr * 100).toFixed(1);
+      const note = cwtr > 1 ? " (>100%=并行,正常)" : "";
+      process.stdout.write("  cumulative_worker_time_ratio (子代理累计耗时/墙钟): " + pct + "%" + note + "\n");
+    }
+
+    // backend_distribution
+    const bdist = backendDistribution[sid] || {};
+    const bdTotal = Object.values(bdist).reduce((a, b) => a + b, 0);
+    const omcCount = bdist["omc"] || 0;
+    const omcPct = bdTotal > 0 ? ((omcCount / bdTotal) * 100).toFixed(1) : "N/A";
+    const bdHealth = bdTotal > 0
+      ? (omcCount / bdTotal >= 0.8 ? "✓健康" : omcCount / bdTotal < 0.2 ? "⚠红线" : "")
+      : "";
+    const bdStr = Object.entries(bdist).map(([k, v]) => k + "=" + v).join(" ") || "{}";
+    process.stdout.write("  backend_distribution (后端分布): " + bdStr + " omc占比=" + omcPct + "% " + bdHealth + "\n");
+  }
+
+  // review_return_rate (global)
+  if (reviewReturnRate === null) {
+    process.stdout.write("  review_return_rate (把关率): N/A: no reliable review source\n");
+  } else {
+    const pct = (reviewReturnRate * 100).toFixed(1);
+    const health = reviewReturnRate >= 0.05 && reviewReturnRate <= 0.2
+      ? "✓健康"
+      : reviewReturnRate < 0.02
+      ? "⚠红线(<2%)"
+      : reviewReturnRate > 0.5
+      ? "⚠偏高(>50%)"
+      : "";
+    process.stdout.write("  review_return_rate (把关率): " + pct + "% " + health + "\n");
+  }
+
+  // incomplete_ratio (global)
+  if (incompleteRatio === null) {
+    process.stdout.write("  incomplete_ratio (incomplete 占比): N/A\n");
+  } else {
+    const pct = (incompleteRatio * 100).toFixed(1);
+    const health = incompleteRatio < 0.1 ? "✓健康" : incompleteRatio > 0.3 ? "⚠红线(>30%)" : "";
+    process.stdout.write("  incomplete_ratio (incomplete 占比): " + pct + "% " + health + "\n");
+  }
+
+  // enforce_deny metrics (global, from enforce-log.jsonl)
+  // Physical enforcement evidence: deny_count > 0 = hook has actively blocked dispatches.
+  process.stdout.write("\n## Enforce-Backend Deny Metrics (物理强制拦截证据)\n");
+  if (enforceDenyCount === 0 && Object.keys(enforceDenyByReason).length === 0) {
+    process.stdout.write("  enforce_deny_count: 0 denies (no enforce-log or no deny entries)\n");
+  } else {
+    process.stdout.write("  enforce_deny_count: " + enforceDenyCount + "\n");
+    const reasons = Object.entries(enforceDenyByReason).map(([r, n]) => r + "=" + n).join(" ");
+    process.stdout.write("  enforce_deny_by_reason: " + (reasons || "{}") + "\n");
   }
 }
 

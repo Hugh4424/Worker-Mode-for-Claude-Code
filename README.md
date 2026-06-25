@@ -38,7 +38,7 @@ Three previous fixes were tried. All failed:
 
 The root cause: soft prompts get diluted in long contexts and get ignored. This plugin first tried the pure-incentive road (change the default instinct, intercept nothing) — and three real sessions proved it out: protocol-in-prompt and nudges alike were ignored, delegation stayed at ~0%. Seeing the reminder didn't change the behavior (self-correction blindspot).
 
-**So the plugin now ships a default hard-gate.** A PreToolUse hook `deny`s the orchestrator's own write/test-class tool calls and hands back guidance ("delegate this to a subagent") — `deny`+guidance, not a bare block, so the redirect is seamless instead of "try → blocked → route around → double waste". Reads, delegation, light scheduling, and writes to scheduling outputs stay allowed. Set `WORKER_FORCE_DELEGATE=off` to revert to the original pure-incentive, intercept-nothing mode.
+**So the plugin enforces delegation structurally via tool-stripping.** The main session runs as the `coordinator` agent (via `settings.json` `agent` field), which physically has no Write/Edit/MultiEdit — the hands to write code are removed, so authoring must be delegated. A `PreToolUse` hook (`enforce-backend`) physically blocks Task calls routed to the wrong backend (not write/test-class tool calls — it gates which backend you dispatch *to*). A `PostToolUseFailure` hook (`detect-omc-failure`) writes a failure marker when a Task fails, preventing silent auto-fallback to the legacy backend. Reads, delegation (`Task`/`Agent`), and light Bash stay fully available.
 
 ---
 
@@ -121,7 +121,7 @@ git clone https://github.com/Hugh4424/Worker-Mode-for-Claude-Code ~/.claude/Work
 export WORKER_LOG_PATH=/abs/path/to/worker-log.jsonl
 ```
 
-Add this to your `~/.zshrc` (or `~/.bashrc`) so it persists across terminal sessions. Missing it? The plugin tells you loudly instead of silently writing somewhere wrong. (This config check never blocks the session — the only thing that gates tool calls is the force-delegate hook, and only write/test-class ones.)
+Add this to your `~/.zshrc` (or `~/.bashrc`) so it persists across terminal sessions. Missing it? The plugin tells you loudly instead of silently writing somewhere wrong. (This config check never blocks the session.)
 
 **3. Wire the agents in (one-time):**
 
@@ -150,16 +150,21 @@ node tools/check-context-health.mjs {transcript.jsonl}
 
 ---
 
-## Why a default hard-gate (and how it avoids the "route-around" waste)
+## How enforcement works
 
-This plugin started as pure-incentive: change the default instinct, intercept nothing. Three real sessions proved that road dead — protocol-in-prompt and nudges were both ignored, delegation stayed at ~0%. The orchestrator *saw* the reminders and didn't change (self-correction blindspot). On the plugin layer, every "soft" lever (injected text, reminders, dashboards, skills) was exhausted and falsified.
+This plugin started as pure-incentive: change the default instinct, intercept nothing. Three real sessions proved that road dead — protocol-in-prompt and nudges were both ignored, delegation stayed at ~0%. The orchestrator *saw* the reminders and didn't change (self-correction blindspot). A `PreToolUse` deny-hook was tried next but misfired on git commits, stderr redirects, and other write-shaped Bash — too many false positives.
 
-The fear with hard blocking is the **try → get blocked → route around** waste — the model plans the whole task (tokens spent), *then* hits the wall. This plugin's gate sidesteps that two ways:
+**Current mechanism: tool-stripping + backend routing enforcement.**
 
-- **`deny` + guidance, not a bare block.** The denied call returns a `permissionDecisionReason` ("delegate this write/test to a subagent") the model reads immediately, so it redirects on the spot instead of re-planning.
-- **Surgical scope.** Only the orchestrator's *own* write/test-class calls are gated. Reads, `Task`/`Agent` delegation, light scheduling Bash, and writes to scheduling outputs (paths containing `state`/`status`/`progress`/`journal`/`handoff`/`decision`) all pass. Subagents' own tool calls are never gated (detected via the `agent_id` payload field).
+- **Tool-stripping (primary):** The main session runs as the `coordinator` agent (`settings.json` `agent` field → coordinator's `tools` allowlist). `Write`/`Edit`/`MultiEdit` are physically absent — the foreman literally can't write code itself; it has to delegate.
+- **Backend enforcement (`enforce-backend` hook, `PreToolUse` on Task/Agent):** Physically blocks Task calls routed to the wrong backend. This is *not* about blocking write operations — it gates which execution backend you dispatch *to* (OMC agents vs. legacy agents). Set `WORKER_MODE_BACKEND=legacy` to use the legacy worker crew instead of the default OMC backend.
+- **Fail-stop (`detect-omc-failure` hook, `PostToolUseFailure` on Task/Agent):** When a Task call fails, writes an `omc-failure.marker` file. `enforce-backend` then blocks Task calls that would auto-fallback to the legacy backend — retrying by dispatching an OMC agent again is still allowed. To clear the marker and resume normally, set `WORKER_MODE_BACKEND=legacy` or run `node tools/clear-failure-marker.mjs`. This prevents silent auto-fallback, not all retries.
 
-**Escape valve:** set `WORKER_FORCE_DELEGATE=off` (or `0`/`false`) to revert to the original pure-incentive, intercept-nothing mode. The hook fails open on any internal error — it will never wedge your session.
+**fail-stop boundary — be honest about what's covered:**
+- **Covered (tool-level failures):** Task call itself errors → `PostToolUseFailure` fires → marker written → subsequent legacy fallback / wrong-backend Task calls are blocked; OMC retry is still allowed. This is physically automatic.
+- **NOT covered (agent soft-failures):** OMC agent runs and returns normally but its result is wrong, incomplete, or "failed" in content. There is no reliable automatic signal for this — the hook never fires because the tool call *succeeded*. These require the foreman to catch during review. Do not assume all failures are automatically blocked.
+
+**Backend switch:** `export WORKER_MODE_BACKEND=legacy` routes to the legacy worker crew (`agents/` directory). The SessionStart hook always tells you which backend is active at the top of each session.
 
 ---
 
@@ -192,7 +197,7 @@ The short version: **it's not a skill you activate — it's a default instinct y
 - Your project is under ~500 lines total
 - You're not on a Claude Pro/Max plan where Opus cost actually matters
 
-This earns its keep on **long, multi-step sessions** where context bloat and token cost are real. If the above applies, the gate is overhead with no payoff — set `WORKER_FORCE_DELEGATE=off` to turn it off and keep the protocol as pure incentive.
+This earns its keep on **long, multi-step sessions** where context bloat and token cost are real. If the above applies, the foreman protocol is overhead with no payoff — you can still use the coordinator agent's CLAUDE.md guidance as a pure-incentive nudge without the structural enforcement.
 
 ---
 
