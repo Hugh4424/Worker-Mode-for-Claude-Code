@@ -222,10 +222,13 @@ test("backend field: implementer → legacy", () => {
   assert.equal(rec.backend, "legacy", "implementer should map to backend=legacy");
 });
 
-test("backend field: startsWith boundary — legacy-oh-my-claudecode:x → legacy (not omc)", () => {
+test("backend field: unknown namespace 'legacy-oh-my-claudecode:executor' → backend=unknown (namespace bypass fix)", () => {
   const logPath = join(dir, "worker-log.jsonl");
   const stdinJson = makeCustomFixture({
-    // startsWith("oh-my-claudecode:") is false here → legacy
+    // Security fix: classifyAgentBackend no longer uses lastIndexOf(":") to extract base name.
+    // Any subagentType containing ":" but NOT starting with the known omcPrefix → "unknown".
+    // "legacy-oh-my-claudecode:executor" does not start with "oh-my-claudecode:" → unknown.
+    // This closes the namespace bypass: "other:executor" can no longer be misclassified as omc.
     agentType: "legacy-oh-my-claudecode:executor",
     orchMessages: [{ id: "o1", usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }],
     subMessages: [{ id: "s1", usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }],
@@ -235,10 +238,13 @@ test("backend field: startsWith boundary — legacy-oh-my-claudecode:x → legac
   assert.equal(r.status, 0, "must exit 0\nstderr: " + r.stderr);
 
   const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  // record-worker maps classifyAgentBackend result: omc→"omc", anything else (legacy/unknown)→"legacy".
+  // "legacy-oh-my-claudecode:executor" → classifyAgentBackend returns "unknown" (unknown namespace)
+  // → record-worker coerces to "legacy" (unknown agents are not omc, so they fall into legacy bucket).
   assert.equal(
     rec.backend,
     "legacy",
-    "legacy-oh-my-claudecode:executor must NOT match startsWith, should be backend=legacy"
+    "legacy-oh-my-claudecode:executor → classifyAgentBackend='unknown' → record-worker coerces to 'legacy'"
   );
 });
 

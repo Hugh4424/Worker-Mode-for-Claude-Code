@@ -19,6 +19,9 @@ import { createRequire } from "node:module";
 import { readFileSync, existsSync, mkdirSync, appendFileSync, openSync, writeSync, closeSync } from "node:fs";
 import { basename, dirname, isAbsolute } from "node:path";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { resolveOmcPrefix, classifyAgentBackend } from "../tools/lib/resolve-omc-prefix.mjs";
 
 // ── single-run wall-clock guard (FR-REC-004 ②) ────────────────────────────────
 // The script is fully synchronous, so a timer/AbortController would never fire.
@@ -143,9 +146,15 @@ const lastMsg = hookData.last_assistant_message || "";
 // (the dispatched agent's frontmatter name). Sentinel "unknown" when absent so a
 // missing type is a legal recorded state, never an empty/missing field.
 const subagentType = hookData.agent_type || "unknown";
-// backend: "omc" if subagent_type starts with "oh-my-claudecode:", else "legacy".
-// Use startsWith (not includes) to avoid spoofed names like "evil:oh-my-claudecode:x".
-const backend = (subagentType || "").startsWith("oh-my-claudecode:") ? "omc" : "legacy";
+// backend: classify via shared roster-based function (not hardcoded startsWith).
+// classifyAgentBackend handles bare-name envs ("executor" → "omc") and plugin envs
+// ("oh-my-claudecode:executor" → "omc") correctly without prefix-matching brittleness.
+// "unknown" agents fall back to "legacy" label for logging purposes (conservative).
+const hookCwdForProbe = hookData.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+const probeHomeForRecord = process.env.OMC_PROBE_HOME || undefined;
+const { prefix: omcPrefixForRecord } = resolveOmcPrefix({ cwd: hookCwdForProbe, home: probeHomeForRecord });
+const agentClassification = classifyAgentBackend(subagentType, omcPrefixForRecord);
+const backend = agentClassification === "omc" ? "omc" : "legacy";
 // cwd is the orchestrator working directory — used to run the version-diff source.
 const hookCwd = hookData.cwd || "";
 
