@@ -16,7 +16,11 @@
 // Node ESM, zero external dependencies.
 
 import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { resolveOmcPrefix, classifyAgentBackend } from "../tools/lib/resolve-omc-prefix.mjs";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── stdin ─────────────────────────────────────────────────────────────────────
 
@@ -72,9 +76,14 @@ try {
   }
 
   // 3. Only write marker for omc failures.
-  //    Use startsWith (not includes) to avoid spoofed names like "evil:oh-my-claudecode:x".
+  //    Use classifyAgentBackend (not hardcoded startsWith) so bare-name OMC agents
+  //    (e.g. "executor" without prefix) are also correctly detected as omc failures.
   const subagentType = tool_input?.subagent_type || "";
-  if (!subagentType.startsWith("oh-my-claudecode:")) {
+  const cwd = process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd();
+  const probeHome = process.env.OMC_PROBE_HOME || undefined;
+  const { prefix: omcPrefix } = resolveOmcPrefix({ cwd, home: probeHome });
+  const agentClass = classifyAgentBackend(subagentType, omcPrefix);
+  if (agentClass !== "omc") {
     process.stdout.write("{}\n");
     process.exit(0);
   }
