@@ -38,7 +38,7 @@
 
 根因：软提示在长上下文里被注意力稀释、被无视。这个插件最初走的是纯激励路线（只改默认念头、什么都不拦）——三次真实会话把这条路证伪了：协议常驻、nudge 提醒全被无视，委派率 ~0%。工头**看到了**提醒照样不改（自我修正盲区）。插件层能用的「软的」（注入文字/提醒/仪表盘/skill）已被穷尽并全部证伪。
 
-**所以插件现在默认装一道硬拦截。** 一个 PreToolUse hook 把工头自己的写/测类工具调用 `deny` 掉，并回一段引导（「这活派给子代理」）——是 `deny`+引导，不是干巴巴一拦，所以是无缝改派，不是「尝试→被拦→绕路→双倍浪费」。读类、派活、轻量调度、写调度产出一律放行。设 `WORKER_FORCE_DELEGATE=off` 可退回最初的纯激励、零拦截模式。
+**所以插件用工具剥离+后端路由强制来落地。** 主会话以 `coordinator` 身份运行（`settings.json` `agent` 字段 → coordinator 的 `tools` 白名单），物理没有 Write/Edit/MultiEdit——工头字面意义上没有写代码的手，只能把实现派出去。`enforce-backend` hook（PreToolUse，Task/Agent）物理拦截派到错误后端的 Task 调用——注意这拦的是你派给哪个后端，不是拦写操作本身。`detect-omc-failure` hook（PostToolUseFailure，Task/Agent）在 Task 调用失败时写入 failure marker，防止静默自动降级。
 
 ---
 
@@ -121,7 +121,7 @@ git clone https://github.com/Hugh4424/Worker-Mode-for-Claude-Code ~/.claude/Work
 export WORKER_LOG_PATH=/abs/path/to/worker-log.jsonl
 ```
 
-把这行加进 `~/.zshrc`（或 `~/.bashrc`），否则重开终端就失效了。没配？插件会明确告诉你，不会偷偷写到错误的地方。（这个配置检查**永不阻断会话**——真正会拦工具调用的是 force-delegate hook，且只拦写/测类。）
+把这行加进 `~/.zshrc`（或 `~/.bashrc`），否则重开终端就失效了。没配？插件会明确告诉你，不会偷偷写到错误的地方。（这个配置检查**永不阻断会话**。）
 
 **3. 把 agent 接进项目（一次性）：**
 
@@ -150,16 +150,21 @@ node tools/check-context-health.mjs {主会话转录.jsonl}
 
 ---
 
-## 为什么默认装硬拦截（以及它怎么躲开「绕路」浪费）
+## 落地机制：工具剥离 + 后端路由强制
 
-这插件最初是纯激励：只改默认念头，什么都不拦。三次真实会话把这条路证明走死了——协议常驻、nudge 全被无视，委派率 ~0%。工头**看到**提醒照样不改（自我修正盲区）。插件层每一个「软的」杠杆（注入文字、提醒、仪表盘、skill）都试到头、全部证伪。
+这插件最初是纯激励：只改默认念头，什么都不拦。三次真实会话把这条路证明走死了——协议常驻、nudge 全被无视，委派率 ~0%。工头**看到**提醒照样不改（自我修正盲区）。随后试过 PreToolUse deny-hook 拦写/测类工具，但误伤 git 提交消息、stderr 重定向等写操作形态，误报率太高，已废弃。
 
-硬拦的顾虑是**尝试→被拦→绕路**的浪费——模型先把整个任务规划完（token 已花），**然后**才撞墙。这插件的拦截用两招躲开它：
+**现行机制：工具剥离 + 后端路由强制。**
 
-- **`deny`+引导，不是干巴巴一拦。** 被拦的调用会回一段 `permissionDecisionReason`（「把这个写/测派给子代理」），模型当场读到、当场改派，不用重新规划。
-- **精准范围。** 只拦工头**自己**的写/测类调用。读类、`Task`/`Agent` 派活、轻量调度 Bash、写调度产出（路径含 `state`/`status`/`progress`/`journal`/`handoff`/`decision`）全部放行。子代理自己的工具调用永不被拦（靠 payload 的 `agent_id` 字段区分）。
+- **工具剥离（核心）：** 主会话以 `coordinator` 身份运行（`settings.json` `agent` 字段 → coordinator 的 `tools` 白名单），物理没有 Write/Edit/MultiEdit——工头字面意义上没有写代码的手，必须把实现派出去。
+- **后端路由强制（`enforce-backend` hook，PreToolUse on Task/Agent）：** 物理拦截派到错误后端的 Task 调用。注意：这拦的是你把活派给**哪个后端**（OMC agent 还是 legacy agent），不是拦写操作本身。设 `WORKER_MODE_BACKEND=legacy` 可切回自研 worker 团队。
+- **Fail-stop（`detect-omc-failure` hook，PostToolUseFailure on Task/Agent）：** Task 调用报错时写入 `omc-failure.marker`，`enforce-backend` 随后阻断【自动降级到 legacy 后端】——重新派 OMC agent 的正常重试仍然允许，不阻断。要清除 marker 并恢复正常，设 `WORKER_MODE_BACKEND=legacy` 或跑 `node tools/clear-failure-marker.mjs`，防止静默降级。
 
-**逃生阀：** 设 `WORKER_FORCE_DELEGATE=off`（或 `0`/`false`）退回最初的纯激励、零拦截模式。hook 任何内部异常都 fail-open——绝不会卡死你的会话。
+**fail-stop 边界——诚实标注覆盖范围：**
+- **已覆盖（工具级失败）：** Task 调用本身报错 → PostToolUseFailure 触发 → 写入 marker → 后续自动降级到 legacy/派错后端的 Task 被阻断；正常重新派 OMC 不阻断。这是自动物理保证。
+- **未覆盖（agent 软失败）：** OMC agent 正常返回但结论是失败/没做好。hook 不触发（工具调用**成功**了），没有可靠的自动信号。这类失败要靠工头验收时人工识别并处置。别误以为所有失败都会被自动物理阻断。
+
+**后端开关：** `export WORKER_MODE_BACKEND=legacy` 切换到自研 worker 团队（`agents/` 目录）。SessionStart 每次启动都会告诉你当前是哪个后端。
 
 ---
 
@@ -192,7 +197,7 @@ node tools/check-context-health.mjs {主会话转录.jsonl}
 - 项目代码总量不超过约 500 行
 - 你没有 Claude Pro/Max 订阅，Opus 成本对你不是真问题
 
-它在**长的、多步的开发会话**里才值回票价——那种上下文膨胀、模型成本是真问题的场景。如果上面那些条件符合你，这道拦截就是只有负担、没有收益——设 `WORKER_FORCE_DELEGATE=off` 关掉它，把协议当纯激励用就行。
+它在**长的、多步的开发会话**里才值回票价——那种上下文膨胀、模型成本是真问题的场景。如果上面那些条件符合你，工头协议本身是只有负担、没有收益——你仍可以把 coordinator.md 的引导当纯激励来用，不做结构性强制。
 
 ---
 

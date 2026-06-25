@@ -1,5 +1,5 @@
 {
-  "description": "Worker-Mode delegation hooks. Delegation enforcement is NOT done here — it is done structurally via tool-stripping the orchestrator (settings.json `agent: coordinator` + coordinator.md tools allowlist with no Write/Edit/Bash), which proved more robust than the removed PreToolUse deny-hook (force-delegate, which mis-fired on stderr redirects, git commit messages, etc.). Remaining hooks are observers/reminders only: (1) SubagentStop record-worker: pure observer, appends one JSONL record per worker. (2) SessionStart check-config: non-blocking WORKER_LOG_PATH reminder. The fail-loud hard stop for a missing log path lives in record-worker.mjs.",
+  "description": "Worker-Mode delegation hooks. Enforcement here is backend-routing, not write-blocking. (1) PreToolUse enforce-backend: physically blocks Task calls routed to the wrong backend (deny wrong-backend dispatch + marker-based legacy fallback guard after OMC failure). (2) PostToolUseFailure detect-omc-failure: writes omc-failure.marker when a Task call errors, so enforce-backend can block silent auto-fallback to legacy. (3) SubagentStop record-worker: pure observer, appends one JSONL record per worker. (4) SessionStart check-config: non-blocking WORKER_LOG_PATH reminder. (5) PostToolUse spool-tool-output: observer, spools Bash/Read/Grep output. Write/Edit delegation is enforced structurally via tool-stripping the orchestrator (coordinator.md tools allowlist has no Write/Edit/MultiEdit), not via these hooks.",
   "hooks": {
     "SessionStart": [
       {
@@ -24,6 +24,18 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/enforce-backend.mjs\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Bash|Read|Grep",
@@ -32,6 +44,18 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/spool-tool-output.mjs\"",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/detect-omc-failure.mjs\"",
+            "timeout": 5
           }
         ]
       }

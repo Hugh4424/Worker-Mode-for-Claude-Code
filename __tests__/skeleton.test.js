@@ -79,10 +79,13 @@ test("SessionStart config guard surfaces a non-blocking reminder, never blocks",
   assert.equal(rel.status, 0, "guard must NOT block on a non-absolute path");
   assert.match(JSON.parse(rel.stdout).hookSpecificOutput.additionalContext, /absolute/i, "reminder must flag non-absolute path");
 
-  // Set to an absolute path => silent (exit 0, no reminder).
+  // Set to an absolute path => only backend hint emitted (no config reminder), exit 0.
   const ok = spawnSync("node", [guard], { env: { ...env, WORKER_LOG_PATH: "/tmp/x.jsonl" }, encoding: "utf8" });
   assert.equal(ok.status, 0, "guard must exit 0 when WORKER_LOG_PATH is a valid absolute path");
-  assert.equal(ok.stdout.trim(), "", "guard must stay silent when properly configured");
+  // Backend hint is always emitted; must NOT contain a config reminder for valid path
+  const okOut = JSON.parse(ok.stdout.trim());
+  assert.match(okOut.hookSpecificOutput.additionalContext, /当前执行后端/, "backend hint always present");
+  assert.doesNotMatch(okOut.hookSpecificOutput.additionalContext, /WORKER_LOG_PATH/, "no config reminder when path is valid");
 });
 
 test("component directories exist (agents, hooks, templates, tools)", () => {

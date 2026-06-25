@@ -64,11 +64,16 @@ test("check-config: missing WORKER_LOG_PATH + source=startup → only config rem
   assert.doesNotMatch(ctx, /current\.json/, "no compact reminder for startup");
 });
 
-// ── T5: WORKER_LOG_PATH normal + source=startup → NO output ──────────────────
-test("check-config: configured path + source=startup → no output (clean session)", () => {
+// ── T5: WORKER_LOG_PATH normal + source=startup → backend hint only ──────────
+test("check-config: configured path + source=startup → only backend hint (no config/compact reminders)", () => {
   const r = run({ source: "startup" }, { WORKER_LOG_PATH: "/abs/path/worker-log.jsonl" });
   assert.equal(r.status, 0, `must exit 0; stderr=${r.stderr}`);
-  assert.equal(r.stdout.trim(), "", "no reminders needed → empty stdout");
+  assert.ok(r.stdout.trim(), "backend hint always produced → non-empty stdout");
+  const out = JSON.parse(r.stdout.trim());
+  const ctx = out.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /当前执行后端/, "backend hint must always be present");
+  assert.doesNotMatch(ctx, /WORKER_LOG_PATH/, "no config reminder needed");
+  assert.doesNotMatch(ctx, /current\.json/, "no compact reminder for startup");
 });
 
 // ── T6: output is single valid JSON (not multiple lines of JSON) ─────────────
@@ -98,4 +103,27 @@ test("check-config: empty stdin → no crash, exits 0", () => {
     env: { ...process.env, WORKER_LOG_PATH: "/abs/path/worker-log.jsonl" },
   });
   assert.equal(r.status, 0, `must not crash on empty stdin; stderr=${r.stderr}`);
+});
+
+// ── T9: WORKER_MODE_BACKEND unset → omc backend hint ─────────────────────────
+test("check-config: WORKER_MODE_BACKEND unset → shows omc backend hint", () => {
+  const env = { ...process.env, WORKER_LOG_PATH: "/abs/path/worker-log.jsonl" };
+  delete env.WORKER_MODE_BACKEND;
+  const r = spawnSync("node", [script], { input: JSON.stringify({ source: "startup" }), encoding: "utf8", env });
+  assert.equal(r.status, 0, `must exit 0; stderr=${r.stderr}`);
+  const out = JSON.parse(r.stdout.trim());
+  const ctx = out.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /当前执行后端.*omc/, "unset backend defaults to omc hint");
+});
+
+// ── T10: WORKER_MODE_BACKEND=legacy → legacy backend hint ────────────────────
+test("check-config: WORKER_MODE_BACKEND=legacy → shows legacy backend hint", () => {
+  const r = run(
+    { source: "startup" },
+    { WORKER_LOG_PATH: "/abs/path/worker-log.jsonl", WORKER_MODE_BACKEND: "legacy" }
+  );
+  assert.equal(r.status, 0, `must exit 0; stderr=${r.stderr}`);
+  const out = JSON.parse(r.stdout.trim());
+  const ctx = out.hookSpecificOutput.additionalContext;
+  assert.match(ctx, /当前执行后端.*legacy/, "legacy backend hint present");
 });

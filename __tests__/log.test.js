@@ -85,8 +85,9 @@ test("EC-LOG: session-level fields computed from orchestrator transcript", () =>
   // o1-text(0) + o1-tooluse(1) + o2(2) = 3. (dedup-by-id would drop o1's
   // tool_use sibling and wrongly yield 1 — this fixture guards that bug.)
   assert.equal(rec.orchestrator_action_count, 3, "action count = all pre-dedup tool_use blocks");
-  // orchestrator tokens deduped by message.id: o1(input100+output10) + o2(input200+output20) = 330
-  assert.equal(rec.orchestrator_tokens, 330, "orchestrator tokens deduped by message.id");
+  // orchestrator tokens deduped by message.id, all 4 fields:
+  // o1(input100+output10+cache_read50+cache_creation0=160) + o2(input200+output20+cache_read300+cache_creation5=525) = 685
+  assert.equal(rec.orchestrator_tokens, 685, "orchestrator tokens = sum of all 4 token fields (input+output+cache_read+cache_creation) per unique message");
   // context size = latest assistant input_tokens + cache_read = 200 + 300 = 500
   assert.equal(rec.orchestrator_context_size, 500, "context size = latest input+cache_read");
 });
@@ -124,8 +125,9 @@ test("EC-LOG: worker fields computed from subagent transcript", () => {
   runRecord(makeFixture(), logPath);
   const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
   assert.equal(rec.model, "claude-sonnet-4-6", "model from subagent transcript");
-  // worker tokens deduped by id: s1(3+63) + s2(1+17) = 84
-  assert.equal(rec.worker_tokens, 84, "worker tokens deduped by message.id");
+  // worker tokens deduped by id, all 4 fields:
+  // s1(input3+output63+cache_read0+cache_creation23745=23811) + s2(input1+output17+cache_read23745+cache_creation0=23763) = 47574
+  assert.equal(rec.worker_tokens, 47574, "worker tokens = sum of all 4 token fields (input+output+cache_read+cache_creation) per unique message");
   // duration = last - first timestamp = 10:00:35 - 10:00:30 = 5000ms
   assert.equal(rec.duration_ms, 5000, "duration from first/last subagent timestamp");
 });

@@ -44,6 +44,7 @@ try {
 }
 
 const workerLogPath = process.env.WORKER_LOG_PATH || "";
+const workerModeBackend = process.env.WORKER_MODE_BACKEND || "omc";
 
 // ── collect all reminders, emit once at the end ──────────────────────────────
 const messages = [];
@@ -60,6 +61,13 @@ if (!workerLogPath) {
       "Use absolute path records always land in the same place regardless of cwd, " +
       "e.g. export WORKER_LOG_PATH=/abs/path/to/worker-log.jsonl"
   );
+}
+
+// Backend hint — always shown so foreman knows which routing is active
+if (workerModeBackend === "legacy") {
+  messages.push("[Worker-Mode] 当前执行后端: legacy（派活走 agents/ 下自研 worker）");
+} else {
+  messages.push("[Worker-Mode] 当前执行后端: omc（派活走 oh-my-claudecode:* agent）");
 }
 
 // Compact restore reminder (D-降本: post-compression, reload state from disk)

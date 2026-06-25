@@ -614,3 +614,185 @@ test("P1-A: duplicate dispatch_id records are counted only once in check-metrics
   assert.ok(Math.abs(Number(ratio) - 50 / 750) < 1e-9,
     `worker_token_ratio must reflect deduped record only: 50/750 = ${50 / 750}, got ${ratio}`);
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// New monitoring metrics: complete_token_ratio, cumulative_worker_time_ratio,
+// backend_distribution, review_return_rate, incomplete_ratio
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── Test 1: complete_token_ratio correct math ─────────────────────────────────
+// Uses SAMPLE (sessA): worker=[50,70]=120, orch=[600,900] → MAX=900
+// BUG FIX (阻塞6): complete_token_ratio now uses MAX(orchestrator_tokens) not SUM,
+// to avoid inflating the denominator when multiple worker records all carry the same
+// orchestrator snapshot. This aligns with worker_token_ratio's denominator treatment.
+// complete_token_ratio = 120 / (120 + 900) = 120/1020 (same as worker_token_ratio)
+// worker_token_ratio   = 120 / (120 + 900) = 120/1020 (uses MAX orch)
+test("NEW: complete_token_ratio uses MAX(orchestrator_tokens) to avoid denominator inflation (阻塞6 fix)", () => {
+  const out = JSON.parse(run(writeSample()).stdout);
+  assert.ok("complete_token_ratio" in out, "must output complete_token_ratio key");
+  const ctr = out.complete_token_ratio.sessA;
+  // Both complete_token_ratio and worker_token_ratio use max(orch)=900, denom=1020
+  assert.ok(Math.abs(Number(ctr) - 120 / 1020) < 1e-9,
+    `complete_token_ratio sessA = 120/1020 = ${120/1020} (max orch denom), got ${ctr}`);
+  // worker_token_ratio also uses MAX orch=900, same denom → values are equal
+  const wtr = out.worker_token_ratio.sessA;
+  assert.ok(Math.abs(Number(wtr) - 120 / 1020) < 1e-9,
+    `worker_token_ratio sessA = 120/1020 = ${120/1020}, got ${wtr}`);
+  // Both use same denominator → values are equal (this is expected after the fix)
+  assert.ok(Math.abs(Number(ctr) - Number(wtr)) < 1e-9,
+    "complete_token_ratio and worker_token_ratio must both equal 120/1020 (same max-orch denominator)");
+});
+
+// ── Test 2: backend_distribution grouping ────────────────────────────────────
+test("NEW: backend_distribution groups by backend field, missing → 'unknown'", () => {
+  const BACKEND_SAMPLE = [
+    { session_id: "sessB", orchestrator_action_count: 3, orchestrator_tokens: 500, orchestrator_context_size: 1000, worker_tokens: 40, duration_ms: 1000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: [], ts: "2026-06-20T00:00:01.000Z", backend: "omc" },
+    { session_id: "sessB", orchestrator_action_count: 3, orchestrator_tokens: 500, orchestrator_context_size: 1000, worker_tokens: 40, duration_ms: 1000, model: "claude-sonnet-4-6", work: "w2", result: "ok", files: [], ts: "2026-06-20T00:00:02.000Z", backend: "legacy" },
+    { session_id: "sessB", orchestrator_action_count: 3, orchestrator_tokens: 500, orchestrator_context_size: 1000, worker_tokens: 40, duration_ms: 1000, model: "claude-sonnet-4-6", work: "w3", result: "ok", files: [], ts: "2026-06-20T00:00:03.000Z" },
+  ];
+  const p = join(dir, "backend-worker-log.jsonl");
+  writeFileSync(p, BACKEND_SAMPLE.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const out = JSON.parse(run(p).stdout);
+  assert.ok("backend_distribution" in out, "must output backend_distribution key");
+  const bd = out.backend_distribution.sessB;
+  assert.equal(bd.omc, 1, "omc count = 1");
+  assert.equal(bd.legacy, 1, "legacy count = 1");
+  assert.equal(bd.unknown, 1, "no-backend record → 'unknown' count = 1");
+});
+
+// ── Test 3: review_return_rate N/A when no --transcript ──────────────────────
+test("NEW: review_return_rate is null when no --transcript passed", () => {
+  const out = JSON.parse(run(writeSample()).stdout);
+  assert.ok("review_return_rate" in out, "must output review_return_rate key");
+  assert.strictEqual(out.review_return_rate, null,
+    "review_return_rate must be null when no --transcript arg");
+});
+
+// ── Test 4: review_return_rate with a real transcript via extract-gates ───────
+// Build a minimal transcript JSONL that extract-gates.mjs can parse.
+// Dispatch 1: followed by a next Agent call with "retry" → return
+// Dispatch 2: followed by >30-char text, no back-ref → accept
+// Expected: gate=[return, accept], review_return_rate = 1/2 = 0.5
+test("NEW: review_return_rate computed correctly from extract-gates subprocess", () => {
+  // Construct transcript JSONL. extract-gates reads type=assistant records with
+  // message.content containing tool_use items (Agent/Task), and matches results
+  // via tool_use_id in user records' tool_result items.
+  const tu1Id = "tu_1111";
+  const tu2Id = "tu_2222";
+
+  // Record 0: assistant dispatches Agent (dispatch 1)
+  const rec0 = {
+    type: "assistant",
+    timestamp: "2026-06-20T00:00:01.000Z",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "tool_use", id: tu1Id, name: "Agent", input: { prompt: "do task A", subagent_type: "executor" } }
+      ]
+    }
+  };
+  // Record 1: user returns result for dispatch 1
+  const rec1 = {
+    type: "user",
+    message: {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: tu1Id, content: "done with task A" }
+      ]
+    }
+  };
+  // Record 2: assistant dispatches Agent (dispatch 2) with "retry" keyword → dispatch 1 = return
+  const rec2 = {
+    type: "assistant",
+    timestamp: "2026-06-20T00:00:02.000Z",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "tool_use", id: tu2Id, name: "Agent", input: { prompt: "retry the previous task because it was incomplete", subagent_type: "executor" } }
+      ]
+    }
+  };
+  // Record 3: user returns result for dispatch 2
+  const rec3 = {
+    type: "user",
+    message: {
+      role: "user",
+      content: [
+        { type: "tool_result", tool_use_id: tu2Id, content: "done with retry" }
+      ]
+    }
+  };
+  // Record 4: assistant has substantial text (>30 chars) after last result → dispatch 2 = accept
+  const rec4 = {
+    type: "assistant",
+    timestamp: "2026-06-20T00:00:03.000Z",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "text", text: "Great, both tasks are now complete and everything looks good here." }
+      ]
+    }
+  };
+
+  const transcriptPath = join(dir, "fake-transcript.jsonl");
+  writeFileSync(transcriptPath, [rec0, rec1, rec2, rec3, rec4].map((r) => JSON.stringify(r)).join("\n") + "\n");
+
+  const logPath = writeSample();
+  const args = [join(pluginRoot, "tools", "check-metrics.mjs"), "--log", logPath, "--transcript", transcriptPath, "--json"];
+  const r = spawnSync("node", args, { encoding: "utf8" });
+  assert.equal(r.status, 0, `check-metrics must exit 0; stderr=${r.stderr}`);
+  const out = JSON.parse(r.stdout);
+  // Dispatch 1 = return (next dispatch has "retry"), dispatch 2 = accept (subsequent text)
+  // review_return_rate = 1 return / (1 accept + 1 return) = 0.5
+  assert.ok(out.review_return_rate !== null, "review_return_rate must not be null when transcript provided");
+  assert.ok(Math.abs(Number(out.review_return_rate) - 0.5) < 1e-9,
+    `review_return_rate = 1/(1+1) = 0.5, got ${out.review_return_rate}`);
+});
+
+// ── Test 5: incomplete_ratio global fraction ──────────────────────────────────
+test("NEW: incomplete_ratio = count(status=incomplete) / count(all records)", () => {
+  const INCOMPLETE_RATIO_SAMPLE = [
+    { session_id: "sessIR", orchestrator_action_count: 3, orchestrator_tokens: 500, orchestrator_context_size: 1000, worker_tokens: 40, duration_ms: 1000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: [], ts: "2026-06-20T00:00:01.000Z", status: "ok" },
+    { session_id: "sessIR", orchestrator_action_count: 3, orchestrator_tokens: 500, orchestrator_context_size: 1000, worker_tokens: 40, duration_ms: 1000, model: "claude-sonnet-4-6", work: "w2", result: "ok", files: [], ts: "2026-06-20T00:00:02.000Z", status: "ok" },
+    { session_id: "sessIR", orchestrator_action_count: 3, orchestrator_tokens: null, orchestrator_context_size: null, worker_tokens: null, duration_ms: null, model: null, work: null, result: null, files: [], ts: "2026-06-20T00:00:03.000Z", status: "incomplete" },
+  ];
+  const p = join(dir, "incomplete-ratio-worker-log.jsonl");
+  writeFileSync(p, INCOMPLETE_RATIO_SAMPLE.map((r) => JSON.stringify(r)).join("\n") + "\n");
+  const out = JSON.parse(run(p).stdout);
+  assert.ok("incomplete_ratio" in out, "must output incomplete_ratio key");
+  // 1 incomplete / 3 total = 1/3
+  assert.ok(Math.abs(Number(out.incomplete_ratio) - 1 / 3) < 1e-9,
+    `incomplete_ratio = 1/3 = ${1/3}, got ${out.incomplete_ratio}`);
+});
+
+// ── Test 6: cumulative_worker_time_ratio using INFLATE_SAMPLE ─────────────────
+// INFLATE_SAMPLE: two workers, duration_ms=60000 each, totalTaskTime = 1320000ms
+// cumulative = (60000+60000) / 1320000 = 120000/1320000 ≈ 0.09090909...
+test("NEW: cumulative_worker_time_ratio = sum(duration_ms) / wall_clock (can exceed 1 when parallel)", () => {
+  const out = JSON.parse(run(writeInflateSample()).stdout);
+  assert.ok("cumulative_worker_time_ratio" in out, "must output cumulative_worker_time_ratio key");
+  const cwtr = out.cumulative_worker_time_ratio.sessI;
+  // sum(duration_ms) = 60000+60000 = 120000; totalTaskTime = 1320000
+  const expected = 120000 / 1320000;
+  assert.ok(Math.abs(Number(cwtr) - expected) < 1e-9,
+    `cumulative_worker_time_ratio sessI = 120000/1320000 = ${expected}, got ${cwtr}`);
+  // verify it differs from worker_time_ratio (which uses union/execution, not sum/wall)
+  const wtr = out.worker_time_ratio.sessI;
+  assert.ok(Math.abs(Number(cwtr) - Number(wtr)) > 1e-9,
+    "cumulative_worker_time_ratio must differ from worker_time_ratio");
+});
+
+// ── Test 7: sanity check that all 5 new keys are present in JSON output ───────
+test("NEW: all 5 new monitoring metric keys present in JSON output", () => {
+  const out = JSON.parse(run(writeSample()).stdout);
+  const NEW_KEYS = [
+    "complete_token_ratio",
+    "cumulative_worker_time_ratio",
+    "backend_distribution",
+    "review_return_rate",
+    "incomplete_ratio",
+  ];
+  for (const k of NEW_KEYS) {
+    assert.ok(k in out, `must output ${k} key`);
+  }
+});
