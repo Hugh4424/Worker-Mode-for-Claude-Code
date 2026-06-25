@@ -1,0 +1,40 @@
+// omc.jsonc — Worker-Mode × OMC project-level agent model config
+//
+// 警告：agents 对象的 key 必须使用 camelCase（驼峰命名）。
+// 用连字符（如 "document-specialist"）会被 OMC 解析器静默忽略，配置不生效。
+// 多词 agent 名映射：
+//   document-specialist → documentSpecialist
+//   code-simplifier     → codeSimplifier
+//   security-reviewer   → securityReviewer
+//   test-engineer       → testEngineer
+//   git-master          → gitMaster
+//   qa-tester           → qaTester
+//   code-reviewer       → codeReviewer
+//
+// forceInherit 环境（Bedrock/Vertex）注意：tier alias（haiku/sonnet/opus）
+// 在 forceInherit 环境下会映射到 provider-safe model ID，若映射失败可能用错模型。
+// 非标准 provider 用户请验证 probe-omc.mjs 输出的 model 注入行为。
+{
+  "agents": {
+    // 用户点名：搜代码降 haiku，降本核心
+    "explore": { "model": "haiku" },
+    // 轻量文档生成，已是 haiku 默认，显式固定（项目锁定默认值）
+    "writer": { "model": "haiku" },
+    // 外部文档查阅，主要是 grep/fetch，轻量
+    "documentSpecialist": { "model": "haiku" },
+    // 代码简化，逻辑不复杂，sonnet 够
+    "codeSimplifier": { "model": "sonnet" },
+    // 安全审查，需要可靠判断，保 sonnet
+    "securityReviewer": { "model": "sonnet" },
+    // 测试策略，需要质量判断，保 sonnet
+    "testEngineer": { "model": "sonnet" },
+    // git 操作，结构化任务，sonnet 够
+    "gitMaster": { "model": "sonnet" },
+    // QA 交互测试，sonnet 够
+    "qaTester": { "model": "sonnet" },
+    // 代码审查，需要质量判断，保 sonnet
+    "codeReviewer": { "model": "sonnet" }
+    // architect/critic/planner 保持 opus，不降
+    // verifier 保持 sonnet，不降（需要可靠判断）
+  }
+}

@@ -357,3 +357,386 @@ test("enforce_deny_count is 0 and no crash when enforce-log.jsonl does not exist
     cleanup(tmp);
   }
 });
+
+// ── Batch C: mixed-log pollution test (codex 阻塞1) ───────────────────────────
+// A worker-log containing both per-worker rows AND session_metrics rows must NOT
+// let session_metrics rows pollute worker-derived metrics (delegation_rate, etc.).
+// This is the core bug codex reported: 1 worker + 1 session_metrics → delegation_rate
+// goes from 0.1 to 0.2, token metrics become null.
+
+import { mkdirSync } from "node:fs";
+
+test("mixed log: session_metrics rows must not pollute worker-derived metrics (codex 阻塞1)", () => {
+  const tmp = makeTmp();
+  try {
+    const sid = "sess-mixed";
+    // One complete worker record: 4 orchestrator actions, worker_tokens=200, orchestrator_tokens=1000
+    const workerRow = makeWorkerRecord({
+      session_id: sid,
+      orchestrator_action_count: 4,
+      orchestrator_tokens: 1000,
+      worker_tokens: 200,
+      ts: "2026-01-01T01:00:00.000Z",
+      duration_ms: 30000,
+      status: "ok",
+    });
+    // A session_metrics row (event field present) — must be filtered out of worker metrics
+    const sessionMetricsRow = {
+      event: "session_metrics",
+      session_id: sid,
+      context_peak_tokens: 85000,
+      tool_call_composition: { bash: 5, agent: 2, read_only: 3, other: 1 },
+      ts: "2026-01-01T01:00:01.000Z",
+    };
+
+    const logPath = join(tmp, "worker-log.jsonl");
+    writeFileSync(logPath,
+      JSON.stringify(workerRow) + "\n" +
+      JSON.stringify(sessionMetricsRow) + "\n"
+    );
+
+    const result = runMetrics(logPath, ["--json"]);
+    assert.equal(result.status, 0, "exit 0 for mixed log; stderr: " + result.stderr);
+    const metrics = JSON.parse(result.stdout.trim());
+
+    // delegation_rate = workerRows / orchestrator_action_count = 1 / 4 = 0.25
+    // (NOT 2/4=0.5 which would happen if session_metrics row counted as a worker dispatch)
+    assert.ok(
+      Math.abs(metrics.delegation_rate[sid] - 0.25) < 0.001,
+      "delegation_rate must be 1/4=0.25, not 2/4=0.5 (session_metrics row must not inflate numerator); got " +
+        metrics.delegation_rate[sid]
+    );
+
+    // complete_token_ratio = worker_tokens / (worker_tokens + orchestrator_tokens)
+    //                      = 200 / (200 + 1000) = 200/1200 ≈ 0.1667
+    assert.ok(
+      metrics.complete_token_ratio[sid] !== null,
+      "complete_token_ratio must not be null — session_metrics row (no worker_tokens) must not contaminate"
+    );
+    assert.ok(
+      Math.abs(metrics.complete_token_ratio[sid] - 200 / 1200) < 0.001,
+      "complete_token_ratio must be 200/1200≈0.1667; got " + metrics.complete_token_ratio[sid]
+    );
+
+    // worker_token_ratio = worker_tokens / (worker_tokens + orchestrator_tokens)
+    //                    = 200 / (200 + 1000) = 200/1200 ≈ 0.1667
+    assert.ok(
+      metrics.worker_token_ratio[sid] !== null,
+      "worker_token_ratio must not be null — session_metrics row must be excluded from worker metrics"
+    );
+    assert.ok(
+      Math.abs(metrics.worker_token_ratio[sid] - 200 / 1200) < 0.001,
+      "worker_token_ratio must be 200/1200≈0.1667; got " + metrics.worker_token_ratio[sid]
+    );
+  } finally {
+    cleanup(tmp);
+  }
+});
+
+// ── Batch C: context_composition from session_metrics rows ───────────────────
+
+test("context_composition: aggregates tool_call_composition from session_metrics rows", () => {
+  const tmp = makeTmp();
+  try {
+    const sid = "sess-comp";
+    const workerRow = makeWorkerRecord({ session_id: sid });
+    const sm1 = {
+      event: "session_metrics",
+      session_id: sid,
+      context_peak_tokens: 10000,
+      tool_call_composition: { bash: 3, agent: 1, read_only: 2, other: 0 },
+      ts: "2026-01-01T01:00:01.000Z",
+    };
+    const sm2 = {
+      event: "session_metrics",
+      session_id: sid,
+      context_peak_tokens: 20000,
+      tool_call_composition: { bash: 2, agent: 3, read_only: 1, other: 1 },
+      ts: "2026-01-01T01:00:02.000Z",
+    };
+
+    const logPath = join(tmp, "worker-log.jsonl");
+    writeFileSync(logPath,
+      JSON.stringify(workerRow) + "\n" +
+      JSON.stringify(sm1) + "\n" +
+      JSON.stringify(sm2) + "\n"
+    );
+
+    const result = runMetrics(logPath, ["--json"]);
+    assert.equal(result.status, 0, "exit 0; stderr: " + result.stderr);
+    const metrics = JSON.parse(result.stdout.trim());
+
+    const cc = metrics.context_composition[sid];
+    assert.ok(cc !== null && cc !== undefined, "context_composition must not be null");
+    // sm1 (ts 01:00:01): bash=3, agent=1, read_only=2, other=0 — earlier snapshot
+    // sm2 (ts 01:00:02): bash=2, agent=3, read_only=1, other=1 — latest snapshot (cumulative)
+    // Correct: take latest snapshot (sm2). Wrong (sum): bash=5, agent=4, read_only=3, other=1.
+    // These values differ from the sum so the test will FAIL if code reverts to summing.
+    assert.equal(cc.bash, 2, "context_composition bash must be from latest snapshot (sm2=2), NOT sum (5)");
+    assert.equal(cc.agent, 3, "context_composition agent must be from latest snapshot (sm2=3), NOT sum (4)");
+    assert.equal(cc.read_only, 1, "context_composition read_only must be from latest snapshot (sm2=1), NOT sum (3)");
+    assert.equal(cc.other, 1, "context_composition other must be from latest snapshot (sm2=1)");
+  } finally {
+    cleanup(tmp);
+  }
+});
+
+// ── Batch C: true_single_turn_peak from session_metrics rows ─────────────────
+
+test("true_single_turn_peak: max context_peak_tokens across session_metrics rows", () => {
+  const tmp = makeTmp();
+  try {
+    const sid = "sess-peak";
+    const workerRow = makeWorkerRecord({ session_id: sid });
+    const sm1 = {
+      event: "session_metrics",
+      session_id: sid,
+      context_peak_tokens: 85000,
+      tool_call_composition: { bash: 1, agent: 0, read_only: 0, other: 0 },
+      ts: "2026-01-01T01:00:01.000Z",
+    };
+    const sm2 = {
+      event: "session_metrics",
+      session_id: sid,
+      context_peak_tokens: 120000,
+      tool_call_composition: { bash: 0, agent: 1, read_only: 0, other: 0 },
+      ts: "2026-01-01T01:00:02.000Z",
+    };
+    const sm3 = {
+      event: "session_metrics",
+      session_id: sid,
+      context_peak_tokens: 60000,
+      tool_call_composition: { bash: 0, agent: 0, read_only: 1, other: 0 },
+      ts: "2026-01-01T01:00:03.000Z",
+    };
+
+    const logPath = join(tmp, "worker-log.jsonl");
+    writeFileSync(logPath,
+      JSON.stringify(workerRow) + "\n" +
+      JSON.stringify(sm1) + "\n" +
+      JSON.stringify(sm2) + "\n" +
+      JSON.stringify(sm3) + "\n"
+    );
+
+    const result = runMetrics(logPath, ["--json"]);
+    assert.equal(result.status, 0, "exit 0; stderr: " + result.stderr);
+    const metrics = JSON.parse(result.stdout.trim());
+
+    assert.equal(
+      metrics.true_single_turn_peak[sid],
+      120000,
+      "true_single_turn_peak must be max context_peak_tokens across all session_metrics rows = 120000"
+    );
+  } finally {
+    cleanup(tmp);
+  }
+});
+
+// ── Batch C: orchestrator_new_input_ratio from worker records ─────────────────
+
+test("orchestrator_new_input_ratio: taken from worker record with highest orchestrator_input_tokens", () => {
+  const tmp = makeTmp();
+  try {
+    const sid = "sess-ratio";
+    // Two worker records. The one with higher orchestrator_input_tokens should supply the ratio.
+    const rec1 = makeWorkerRecord({
+      session_id: sid,
+      orchestrator_input_tokens: 1000,
+      orchestrator_new_input_tokens: 100,
+      orchestrator_new_input_ratio: 0.10,
+      ts: "2026-01-01T01:00:00.000Z",
+    });
+    const rec2 = makeWorkerRecord({
+      session_id: sid,
+      orchestrator_input_tokens: 5000,
+      orchestrator_new_input_tokens: 600,
+      orchestrator_new_input_ratio: 0.12,
+      ts: "2026-01-01T01:01:00.000Z",
+    });
+
+    const logPath = join(tmp, "worker-log.jsonl");
+    writeFileSync(logPath,
+      JSON.stringify(rec1) + "\n" +
+      JSON.stringify(rec2) + "\n"
+    );
+
+    const result = runMetrics(logPath, ["--json"]);
+    assert.equal(result.status, 0, "exit 0; stderr: " + result.stderr);
+    const metrics = JSON.parse(result.stdout.trim());
+
+    // rec2 has higher orchestrator_input_tokens (5000 > 1000) → its ratio (0.12) wins
+    assert.ok(
+      Math.abs(metrics.orchestrator_new_input_ratio[sid] - 0.12) < 1e-9,
+      "orchestrator_new_input_ratio must come from highest-input-tokens record (rec2=0.12); got " +
+        metrics.orchestrator_new_input_ratio[sid]
+    );
+  } finally {
+    cleanup(tmp);
+  }
+});
+
+// ── Batch C: compact_count with fixture checkpoint directory ──────────────────
+
+test("compact_count: counts checkpoint-*.json files, groups by session_id when present", () => {
+  const tmp = makeTmp();
+  try {
+    // Set up a fake .omc/state/checkpoints directory
+    const checkpointDir = join(tmp, ".omc", "state", "checkpoints");
+    mkdirSync(checkpointDir, { recursive: true });
+
+    // 2 checkpoints for sess-A, 1 for sess-B, 1 with no session field
+    writeFileSync(join(checkpointDir, "checkpoint-001.json"),
+      JSON.stringify({ session_id: "sess-A", ts: "2026-01-01T00:01:00.000Z" }));
+    writeFileSync(join(checkpointDir, "checkpoint-002.json"),
+      JSON.stringify({ session_id: "sess-A", ts: "2026-01-01T00:02:00.000Z" }));
+    writeFileSync(join(checkpointDir, "checkpoint-003.json"),
+      JSON.stringify({ session_id: "sess-B", ts: "2026-01-01T00:03:00.000Z" }));
+    writeFileSync(join(checkpointDir, "checkpoint-004.json"),
+      JSON.stringify({ ts: "2026-01-01T00:04:00.000Z" })); // no session_id
+
+    // Worker log: needs at least one worker record so check-metrics doesn't exit(1)
+    const workerRow = makeWorkerRecord({ session_id: "sess-A" });
+    const logPath = join(tmp, "worker-log.jsonl");
+    writeFileSync(logPath, JSON.stringify(workerRow) + "\n");
+
+    const result = spawnSync(
+      process.execPath,
+      [scriptPath, "--log", logPath, "--json"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, CLAUDE_PROJECT_DIR: tmp },
+      }
+    );
+    assert.equal(result.status, 0, "exit 0; stderr: " + result.stderr);
+    const metrics = JSON.parse(result.stdout.trim());
+
+    const cc = metrics.compact_count;
+    assert.ok(cc !== null && cc !== undefined, "compact_count must be present");
+    assert.equal(cc.count, 4, "compact_count.count must be 4 (all 4 checkpoint files)");
+    assert.equal(cc.scope, "by_session", "scope must be by_session when session_id fields exist");
+    assert.equal(cc.bySession["sess-A"], 2, "sess-A has 2 checkpoints");
+    assert.equal(cc.bySession["sess-B"], 1, "sess-B has 1 checkpoint");
+    assert.equal(cc.bySession["__ungrouped__"], 1, "1 checkpoint with no session_id → __ungrouped__");
+  } finally {
+    cleanup(tmp);
+  }
+});
+
+test("compact_count: returns count=0 when checkpoint directory does not exist", () => {
+  const tmp = makeTmp();
+  try {
+    const workerRow = makeWorkerRecord({ session_id: "sess-nocheckpoints" });
+    const logPath = join(tmp, "worker-log.jsonl");
+    writeFileSync(logPath, JSON.stringify(workerRow) + "\n");
+
+    // No .omc/state/checkpoints directory in tmp → count must be 0
+    const result = spawnSync(
+      process.execPath,
+      [scriptPath, "--log", logPath, "--json"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, CLAUDE_PROJECT_DIR: tmp },
+      }
+    );
+    assert.equal(result.status, 0, "exit 0; stderr: " + result.stderr);
+    const metrics = JSON.parse(result.stdout.trim());
+
+    assert.equal(metrics.compact_count.count, 0,
+      "compact_count.count must be 0 when checkpoint directory does not exist");
+    assert.equal(metrics.compact_count.scope, "global",
+      "scope must be 'global' when no files found");
+  } finally {
+    cleanup(tmp);
+  }
+});
+
+// ── Tie-break tests (codex 终审) ─────────────────────────────────────────────
+
+// context_composition tie-break: same ts → take the LAST record encountered
+test("context_composition tie-break: same ts takes last-encountered session_metrics record", () => {
+  const tmp = makeTmp();
+  try {
+    const sid = "sess-tiebreak-cc";
+    const workerRow = makeWorkerRecord({ session_id: sid });
+    // Two session_metrics rows with IDENTICAL ts — tie-break must favour the later one in log order.
+    const sm1 = {
+      event: "session_metrics",
+      session_id: sid,
+      context_peak_tokens: 10000,
+      tool_call_composition: { bash: 1, agent: 0, read_only: 0, other: 0 },
+      ts: "2026-01-01T01:00:00.000Z", // identical ts
+    };
+    const sm2 = {
+      event: "session_metrics",
+      session_id: sid,
+      context_peak_tokens: 20000,
+      tool_call_composition: { bash: 0, agent: 5, read_only: 0, other: 0 },
+      ts: "2026-01-01T01:00:00.000Z", // identical ts — appears AFTER sm1 in log
+    };
+
+    const logPath = join(tmp, "worker-log.jsonl");
+    writeFileSync(logPath,
+      JSON.stringify(workerRow) + "\n" +
+      JSON.stringify(sm1) + "\n" +
+      JSON.stringify(sm2) + "\n"
+    );
+
+    const result = runMetrics(logPath, ["--json"]);
+    assert.equal(result.status, 0, "exit 0; stderr: " + result.stderr);
+    const metrics = JSON.parse(result.stdout.trim());
+
+    const cc = metrics.context_composition[sid];
+    assert.ok(cc !== null && cc !== undefined, "context_composition must not be null");
+    // sm2 appears later in the log → it must win the tie-break.
+    // sm2 has agent=5; sm1 has agent=0. Reverting to > (first-wins) would give agent=0 and fail.
+    assert.equal(cc.agent, 5,
+      "tie-break: last-encountered record (sm2, agent=5) must win; first-wins would give agent=0");
+    assert.equal(cc.bash, 0,
+      "tie-break: bash must come from sm2 (bash=0), not sm1 (bash=1)");
+  } finally {
+    cleanup(tmp);
+  }
+});
+
+// orchestrator_new_input_ratio tie-break: same input_tokens → take the LAST record encountered
+test("orchestrator_new_input_ratio tie-break: same orchestrator_input_tokens takes last-encountered record", () => {
+  const tmp = makeTmp();
+  try {
+    const sid = "sess-tiebreak-ratio";
+    // Two worker records with IDENTICAL orchestrator_input_tokens but different ratios.
+    const rec1 = makeWorkerRecord({
+      session_id: sid,
+      orchestrator_input_tokens: 3000,
+      orchestrator_new_input_tokens: 300,
+      orchestrator_new_input_ratio: 0.10,
+      ts: "2026-01-01T01:00:00.000Z",
+    });
+    const rec2 = makeWorkerRecord({
+      session_id: sid,
+      orchestrator_input_tokens: 3000, // identical — tie
+      orchestrator_new_input_tokens: 750,
+      orchestrator_new_input_ratio: 0.25,
+      ts: "2026-01-01T01:01:00.000Z", // appears AFTER rec1 in log
+    });
+
+    const logPath = join(tmp, "worker-log.jsonl");
+    writeFileSync(logPath,
+      JSON.stringify(rec1) + "\n" +
+      JSON.stringify(rec2) + "\n"
+    );
+
+    const result = runMetrics(logPath, ["--json"]);
+    assert.equal(result.status, 0, "exit 0; stderr: " + result.stderr);
+    const metrics = JSON.parse(result.stdout.trim());
+
+    // rec2 appears later in the log → its ratio (0.25) must win the tie-break.
+    // Reverting to > (first-wins) would keep rec1's ratio (0.10) and fail this assertion.
+    assert.ok(
+      Math.abs(metrics.orchestrator_new_input_ratio[sid] - 0.25) < 1e-9,
+      "tie-break: last-encountered record (rec2, ratio=0.25) must win; first-wins would give 0.10; got " +
+        metrics.orchestrator_new_input_ratio[sid]
+    );
+  } finally {
+    cleanup(tmp);
+  }
+});

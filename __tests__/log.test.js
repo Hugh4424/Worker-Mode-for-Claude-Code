@@ -23,6 +23,19 @@ let dir;
 
 // Build a minimal-but-realistic orchestrator transcript + subagent transcript + the
 // SubagentStop stdin payload that points at them. Mirrors the real captured shape.
+// Read the first (per-worker) record from a worker-log JSONL.
+// The log now has 2 lines per hook run: line 1 = per-worker record (no event field),
+// line 2 = session_metrics event. Tests that validate the per-worker record use this.
+function readFirstRecord(logPath) {
+  const raw = readFileSync(logPath, "utf8");
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    return JSON.parse(t);
+  }
+  throw new Error("no records in log: " + logPath);
+}
+
 function makeFixture(idx = 0) {
   const orchPath = join(dir, `orch-${idx}.jsonl`);
   const subPath = join(dir, `sub-${idx}.jsonl`);
@@ -70,7 +83,8 @@ test("EC-LOG: appends one record with all 11 fields", () => {
   assert.equal(r.status, 0, `record script must exit 0; stderr=${r.stderr}`);
   assert.ok(existsSync(logPath), "worker-log file must be created");
   const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
-  assert.equal(lines.length, 1, "exactly one record appended");
+  // Each hook run writes 2 lines: per-worker record + session_metrics event.
+  assert.equal(lines.length, 2, "exactly two records appended (per-worker + session_metrics event)");
   const rec = JSON.parse(lines[0]);
   for (const f of WORKER_FIELDS) assert.ok(f in rec, `record must contain worker field '${f}'`);
   for (const f of SESSION_FIELDS) assert.ok(f in rec, `record must contain session field '${f}'`);
@@ -79,7 +93,7 @@ test("EC-LOG: appends one record with all 11 fields", () => {
 test("EC-LOG: session-level fields computed from orchestrator transcript", () => {
   const logPath = join(dir, "worker-log.jsonl");
   runRecord(makeFixture(), logPath);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.equal(rec.session_id, "sess-0", "session_id from stdin");
   // action count = tool_use blocks across ALL pre-dedup assistant msgs:
   // o1-text(0) + o1-tooluse(1) + o2(2) = 3. (dedup-by-id would drop o1's
@@ -115,7 +129,7 @@ test("EC-LOG: action_count dedupes a tool_use id repeated across sibling lines (
   const stdin = JSON.stringify({ session_id: "sess-dup", transcript_path: orchPath, agent_transcript_path: subPath, agent_type: "implementer", last_assistant_message: "x", hook_event_name: "SubagentStop" });
   const r = runRecord(stdin, logPath);
   assert.equal(r.status, 0, `record script must exit 0; stderr=${r.stderr}`);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   // toolu_dup counted once + toolu_uniq = 2 (raw line scan without id-dedup → 3).
   assert.equal(rec.orchestrator_action_count, 2, "action_count dedupes repeated tool_use ids");
 });
@@ -123,7 +137,7 @@ test("EC-LOG: action_count dedupes a tool_use id repeated across sibling lines (
 test("EC-LOG: worker fields computed from subagent transcript", () => {
   const logPath = join(dir, "worker-log.jsonl");
   runRecord(makeFixture(), logPath);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.equal(rec.model, "claude-sonnet-4-6", "model from subagent transcript");
   // worker tokens deduped by id, all 4 fields:
   // s1(input3+output63+cache_read0+cache_creation23745=23811) + s2(input1+output17+cache_read23745+cache_creation0=23763) = 47574
@@ -143,7 +157,8 @@ test("EC-LOG: concurrent N records all appended, no loss (FR-LOG-005)", async ()
     })
   ));
   const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
-  assert.equal(lines.length, N, `all ${N} concurrent records must be present (got ${lines.length})`);
+  // Each hook run writes 2 lines: per-worker record + session_metrics event.
+  assert.equal(lines.length, N * 2, `all ${N} runs × 2 lines each must be present (got ${lines.length})`);
   for (const l of lines) JSON.parse(l); // every line must be valid JSON (no torn writes)
 });
 
@@ -181,7 +196,7 @@ test("EC-LOG: readable-but-empty subagent transcript → writes status=incomplet
   // New behaviour: SubagentStop fired but data is incomplete → write placeholder, exit 0
   assert.equal(r.status, 0, "must exit 0 and write an incomplete placeholder");
   assert.ok(existsSync(logPath), "must write the log file");
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.equal(rec.status, "incomplete", "placeholder must carry status=incomplete");
   assert.ok(typeof rec.incomplete_reason === "string" && rec.incomplete_reason.length > 0, "must carry incomplete_reason");
   // session-level metrics that WERE computable must be non-null
@@ -204,7 +219,7 @@ test("EC-LOG: assistant messages present but no usage → writes status=incomple
   // New behaviour: SubagentStop fired but all assistant messages lack usage → placeholder
   assert.equal(r.status, 0, "must exit 0 and write an incomplete placeholder");
   assert.ok(existsSync(logPath), "must write the log file");
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.equal(rec.status, "incomplete", "placeholder must carry status=incomplete");
   assert.ok(typeof rec.incomplete_reason === "string" && rec.incomplete_reason.length > 0, "must carry incomplete_reason");
   // orchestrator_tokens null because orch transcript also lacks usage
@@ -322,21 +337,21 @@ test("T014: appended record contains subagent_type (literal membership)", () => 
   const logPath = join(dir, "worker-log.jsonl");
   const r = runRecord(makeFixture(), logPath);
   assert.equal(r.status, 0, `record script must exit 0; stderr=${r.stderr}`);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.ok("subagent_type" in rec, "record must contain field 'subagent_type'");
 });
 
 test("T014: appended record contains dispatch_input_tokens (literal membership)", () => {
   const logPath = join(dir, "worker-log.jsonl");
   runRecord(makeFixture(), logPath);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.ok("dispatch_input_tokens" in rec, "record must contain field 'dispatch_input_tokens'");
 });
 
 test("T014: appended record contains summary_return_tokens (literal membership)", () => {
   const logPath = join(dir, "worker-log.jsonl");
   runRecord(makeFixture(), logPath);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.ok("summary_return_tokens" in rec, "record must contain field 'summary_return_tokens'");
 });
 
@@ -344,7 +359,7 @@ test("T014: subagent_type derived from stdin agent_type", () => {
   const logPath = join(dir, "worker-log.jsonl");
   // makeFixture sets agent_type:"implementer"
   runRecord(makeFixture(), logPath);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.equal(rec.subagent_type, "implementer", "subagent_type must come from stdin agent_type");
 });
 
@@ -360,7 +375,7 @@ test("T014: subagent_type missing → sentinel 'unknown' (not empty/missing)", (
   const stdin = JSON.stringify({ session_id: "s", transcript_path: orchPath, agent_transcript_path: subPath, cwd: dir, last_assistant_message: "x", hook_event_name: "SubagentStop" });
   const r = runRecord(stdin, logPath);
   assert.equal(r.status, 0, `must exit 0; stderr=${r.stderr}`);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.equal(rec.subagent_type, "unknown", "subagent_type must be sentinel 'unknown' when agent_type absent");
 });
 
@@ -372,7 +387,7 @@ test("T014: token sources absent → null (NOT 0 — missing-data vs real-zero)"
   // recorded field — see F2 test). Both must be null (not 0), distinguishing
   // missing-data from real-zero.
   runRecord(makeFixture(), logPath);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.equal(rec.dispatch_input_tokens, null, "dispatch_input_tokens must be null when no Agent tool_use usage (not 0)");
   assert.notEqual(rec.dispatch_input_tokens, 0, "must distinguish missing-data from real-zero");
   assert.equal(rec.summary_return_tokens, null, "summary_return_tokens must be null (orchestrator-side tool_result token unrecorded)");
@@ -389,7 +404,7 @@ test("F1/T014: dispatch_input_tokens correlates to THIS worker's dispatch (not t
   const logPath = join(dir, "worker-log.jsonl");
   // meta.toolUseId defaults to toolu_agent1 (this worker's first dispatch, input 777).
   runRecord(makeFixtureWithTokens("disp", { withAgentUsage: true, withSubOutput: true }), logPath);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.equal(rec.dispatch_input_tokens, 12857, "dispatch_input_tokens must come from THIS worker's correlated Agent dispatch (toolu_agent1), summing input+cache_read+cache_creation = 777+12000+80");
   assert.notEqual(rec.dispatch_input_tokens, 777, "must NOT be the bare input_tokens crumb (777) — full input context includes cache_read/cache_creation");
   assert.notEqual(rec.dispatch_input_tokens, 555, "must NOT be the last Agent dispatch's value (toolu_agent2) — that is another worker's");
@@ -402,7 +417,7 @@ test("F1/T014: dispatch_input_tokens correlates to THIS worker's dispatch (not t
 test("F1/T014: dispatch_input_tokens follows the meta.toolUseId join key (keyed, not positional)", () => {
   const logPath = join(dir, "worker-log.jsonl");
   runRecord(makeFixtureWithTokens("disp2", { withAgentUsage: true, withSubOutput: true, metaToolUseId: "toolu_agent2" }), logPath);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.equal(rec.dispatch_input_tokens, 6555, "dispatch_input_tokens must follow the meta.toolUseId join key to toolu_agent2, summing input+cache_read = 555+6000");
 });
 
@@ -412,7 +427,7 @@ test("F1/T014: dispatch_input_tokens follows the meta.toolUseId join key (keyed,
 test("F1/T014: dispatch_input_tokens is null when the join key resolves no dispatch (not last-dispatch fallback)", () => {
   const logPath = join(dir, "worker-log.jsonl");
   runRecord(makeFixtureWithTokens("disp3", { withAgentUsage: true, withSubOutput: true, metaToolUseId: "toolu_nomatch" }), logPath);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.equal(rec.dispatch_input_tokens, null, "must be null when no Agent dispatch matches the join key");
   assert.notEqual(rec.dispatch_input_tokens, 12857, "must NOT fall back to any dispatch's full value (toolu_agent1 = 12857)");
   assert.notEqual(rec.dispatch_input_tokens, 6555, "must NOT fall back to the last dispatch's value (toolu_agent2 = 6555)");
@@ -429,7 +444,7 @@ test("F1/T014: dispatch_input_tokens is null when the join key resolves no dispa
 test("F2/T014: summary_return_tokens is null (orchestrator tool_result token unextractable; NOT subagent output)", () => {
   const logPath = join(dir, "worker-log.jsonl");
   runRecord(makeFixtureWithTokens("summ", { withAgentUsage: true, withSubOutput: true }), logPath);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.equal(rec.summary_return_tokens, null, "summary_return_tokens must be null when the orchestrator-side tool_result token is unavailable");
   assert.notEqual(rec.summary_return_tokens, 999, "must NOT fall back to the subagent's final output_tokens");
 });
@@ -443,7 +458,8 @@ test("T014 (regression): old-format / incomplete-usage log line does not crash t
   const r = runRecord(makeFixture(), logPath);
   assert.equal(r.status, 0, `must exit 0 appending after an old-format line; stderr=${r.stderr}`);
   const lines = readFileSync(logPath, "utf8").trim().split("\n").filter(Boolean);
-  assert.equal(lines.length, 2, "old line preserved + new record appended");
+  // Each hook run appends 2 lines (per-worker + session_metrics), plus the 1 pre-existing old-format line.
+  assert.equal(lines.length, 3, "old line preserved + per-worker record + session_metrics event appended");
   for (const l of lines) JSON.parse(l); // every line still valid JSON
 });
 
@@ -465,7 +481,7 @@ test("FR-REC-003-①a: files prefers the version-diff (git) source over session-
   const stdin = JSON.stringify({ session_id: "s", transcript_path: orchPath, agent_transcript_path: subPath, agent_type: "implementer", cwd: repo, last_assistant_message: "work\nresult: ok\nfiles: from_session.ts", hook_event_name: "SubagentStop" });
   const r = runRecord(stdin, logPath);
   assert.equal(r.status, 0, `must exit 0; stderr=${r.stderr}`);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.ok(rec.files.includes("from_git.ts"), "files must include the git-diff source file");
   assert.ok(!rec.files.includes("from_session.ts"), "git-diff source preferred → session-record file not used");
 });
@@ -475,7 +491,7 @@ test("FR-REC-003-①b: files falls back to session-record when version-diff sour
   // cwd is a NON-git dir (the temp test dir) → git diff yields nothing → fallback.
   const r = runRecord(makeFixture(), logPath); // last_assistant_message has files: a.ts, b.ts
   assert.equal(r.status, 0, `must exit 0; stderr=${r.stderr}`);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.deepEqual(rec.files, ["a.ts", "b.ts"], "files must fall back to session-record parse when git diff empty");
 });
 
@@ -491,7 +507,7 @@ test("FR-REC-003-②: both files sources absent → files === 'unknown' (not emp
   const stdin = JSON.stringify({ session_id: "s", transcript_path: orchPath, agent_transcript_path: subPath, agent_type: "researcher", cwd: dir, last_assistant_message: "read-only, no files changed\nresult: ok", hook_event_name: "SubagentStop" });
   const r = runRecord(stdin, logPath);
   assert.equal(r.status, 0, `must exit 0; stderr=${r.stderr}`);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.equal(rec.files, "unknown", "files must be sentinel 'unknown' when both sources absent");
 });
 
@@ -510,7 +526,7 @@ test("FR-REC-003-③: parallel write conflict (git-diff set != self-reported set
   const stdin = JSON.stringify({ session_id: "s", transcript_path: orchPath, agent_transcript_path: subPath, agent_type: "implementer", cwd: repo, last_assistant_message: "work\nresult: ok\nfiles: only_mine.ts", hook_event_name: "SubagentStop" });
   const r = runRecord(stdin, logPath);
   assert.equal(r.status, 0, `must exit 0; stderr=${r.stderr}`);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.equal(rec.conflict_marker, true, "conflict_marker must be set when version-diff and self-reported file sets disagree");
 });
 
@@ -519,7 +535,7 @@ test("FR-REC-003-③ (no false positive): agreeing sources → conflict_marker n
   // git diff empty + session-record present → no disagreement → no conflict marker.
   const r = runRecord(makeFixture(), logPath);
   assert.equal(r.status, 0, `must exit 0; stderr=${r.stderr}`);
-  const rec = JSON.parse(readFileSync(logPath, "utf8").trim());
+  const rec = readFirstRecord(logPath);
   assert.notEqual(rec.conflict_marker, true, "conflict_marker must NOT be set when sources do not conflict");
 });
 
