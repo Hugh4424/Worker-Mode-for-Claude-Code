@@ -1,23 +1,37 @@
 #!/usr/bin/env node
 // enforce-backend.mjs — PreToolUse hook: enforces backend consistency.
-// Denies Task/Agent dispatches that cross backend boundary (omc ↔ legacy).
+// Denies Task/Agent dispatches that cross the backend boundary (omc ↔ legacy).
 // Also blocks legacy dispatches when omc-failure.marker is present (unless
-// the dispatch is already targeting omc — never kill omc retries).
+// dispatch already targeting omc — never kill omc retries).
 //
 // Two codex bug fixes baked in:
 // (a) Subagent exemption: use Boolean(agent_id) || transcript_path.includes("/subagents/")
 //     NOT agent_id !== session_id (main session has undefined agent_id; undefined !== sessionId
-//     is always true → every dispatch would wrongly be seen as a subagent).
+//     is always true → every dispatch would wrongly appear to be a subagent).
 // (b) Marker blocking: only block wantsLegacy dispatches, NOT omc dispatches.
-//     Marker signals omc is having trouble; blocking omc retries would be
-//     counterproductive.
+//     Marker signals omc having trouble; blocking omc retries would be counterproductive.
+//
+// Backend classification (codex fix — replaces old startsWith(prefix) approach):
+// - Uses classifyAgentBackend(subagentType, omcPrefix) → "omc" | "legacy" | "unknown"
+// - Classification is based on the agent base-name roster, NOT prefix matching.
+// - Works correctly in ALL environments including bare-name (prefix="") where startsWith("")
+//   would match everything and provide no protection.
+// - "unknown" agents are always allowed (fail-open for unrecognised agents).
+//
+// OMC installation detection:
+// - resolveOmcPrefix() detects plugin ("oh-my-claudecode:"), bare-name (""), or not-installed (null).
+// - Not-installed (prefix=null) + backend=omc: configuration error → deny with install hint.
 //
 // Fail-open on any exception (try-catch around entire logic).
 // Only logs denies to .worker-mode/state/enforce-log.jsonl (O_APPEND atomic).
-// Node ESM, zero external dependencies.
+// Node ESM, zero external dependencies except tools/lib/resolve-omc-prefix.mjs.
 
 import { readFileSync, existsSync, mkdirSync, openSync, writeSync, closeSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { resolveOmcPrefix, classifyAgentBackend } from "../tools/lib/resolve-omc-prefix.mjs";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── allow / deny output helpers ───────────────────────────────────────────────
 
@@ -66,6 +80,28 @@ function deny(message, logEntry) {
     }) + "\n"
   );
   process.exit(0);
+}
+
+function logNote(note, stateDir) {
+  // Append informational note to enforce-log.jsonl (non-blocking, never deny).
+  if (!stateDir) return;
+  try {
+    mkdirSync(stateDir, { recursive: true });
+    const logPath = join(stateDir, "enforce-log.jsonl");
+    const line = JSON.stringify({
+      ts: new Date().toISOString(),
+      decision: "note",
+      ...note,
+    }) + "\n";
+    const fd = openSync(logPath, "a");
+    try {
+      writeSync(fd, Buffer.from(line, "utf8"));
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    // non-blocking
+  }
 }
 
 // ── stdin ─────────────────────────────────────────────────────────────────────
@@ -159,15 +195,68 @@ try {
     }
   }
 
-  // 5. Determine target backend: oh-my-claudecode: prefix → omc; else → legacy.
-  //    Must use startsWith (not includes) to avoid spoofed names like
-  //    "evil:oh-my-claudecode:executor" being misclassified as omc.
-  const targetIsOmc = String(subagentType).startsWith("oh-my-claudecode:");
-  const wantsLegacy = !targetIsOmc;
+  // 5. Resolve OMC installation prefix dynamically.
+  //    cwd from hookData (or CLAUDE_PROJECT_DIR) so we detect project-level bare agents too.
+  const cwd = process.env.CLAUDE_PROJECT_DIR || hookData.cwd || process.cwd();
+  // OMC_PROBE_HOME allows tests to inject a fake home directory for resolveOmcPrefix.
+  const probeHome = process.env.OMC_PROBE_HOME || undefined;
+  const { prefix: omcPrefix, source: omcSource, installPath: omcInstallPath } =
+    resolveOmcPrefix({ cwd, home: probeHome });
 
-  // 6. Marker blocking (codex fix b):
+  // 5a. OMC not installed (prefix=null) + backend=omc: configuration error.
+  if (omcPrefix === null && backend === "omc") {
+    deny(
+      `WORKER_MODE_BACKEND=omc 但未检测到 OMC 安装。` +
+        `\n请按 OMC 官方方式安装：/plugin marketplace add + /plugin install oh-my-claudecode@omc` +
+        `\n或设 WORKER_MODE_BACKEND=legacy 使用自研 worker。` +
+        `\n（当前检测到的 omc 前缀：${omcPrefix}，来源：${omcSource}）`,
+      {
+        _stateDir: stateDir,
+        tool_name: toolName,
+        subagent_type: subagentType,
+        backend,
+        reason: "omc_not_installed",
+      }
+    );
+  }
+
+  // 6. Classify agent backend using name roster (replaces old startsWith approach).
+  //    classifyAgentBackend extracts the base name and looks it up in known rosters.
+  //    Works in ALL environments — including bare-name (prefix="") where startsWith("")
+  //    would match everything and provide no protection.
+  //    "unknown" agents → allow (fail-open, we never deny what we don't recognise).
+  const classification = classifyAgentBackend(subagentType, omcPrefix);
+
+  // Determine target direction from classification.
+  // Note: for legacy backend path, if omcPrefix is null we fall back to "oh-my-claudecode:"
+  // for the deny message only (never used for classification logic).
+  const effectivePrefixForMsg = omcPrefix !== null ? omcPrefix : "oh-my-claudecode:";
+  const targetIsOmc = classification === "omc";
+  const targetIsLegacy = classification === "legacy";
+  // unknown agents are neither — they pass through (fail-open).
+  const wantsLegacy = targetIsLegacy;
+  const wantsOmc = targetIsOmc;
+
+  // Log a note when we see an unknown agent (informational, not a deny).
+  if (classification === "unknown") {
+    logNote(
+      {
+        reason: "unknown_agent_allow",
+        subagent_type: subagentType,
+        backend,
+        omc_source: omcSource,
+        message: `Agent '${subagentType}' (base-name not in known rosters) — allowing (fail-open).`,
+      },
+      stateDir
+    );
+    allow();
+  }
+
+  // 7. Marker blocking (codex fix b):
   //    Only block legacy dispatches when marker is present — NOT omc dispatches.
   //    Blocking omc retries when omc is struggling would be counterproductive.
+  //    Important: marker check runs AFTER classification, so bare-name omc agents
+  //    that fail and produce a marker will correctly block subsequent legacy dispatches.
   const markerFile = stateDir ? join(stateDir, "omc-failure.marker") : null;
   const markerExists = markerFile ? existsSync(markerFile) : false;
 
@@ -187,10 +276,11 @@ try {
     );
   }
 
-  // 7. Normal routing consistency check.
+  // 8. Normal routing consistency check.
   if (backend === "omc" && wantsLegacy) {
     deny(
-      `当前 omc 后端，请派 oh-my-claudecode:* agent；要用 legacy 请设 WORKER_MODE_BACKEND=legacy`,
+      `当前 omc 后端，请派 ${effectivePrefixForMsg}* agent（当前检测前缀：${omcPrefix}，来源：${omcSource}）；` +
+        `要用 legacy 请设 WORKER_MODE_BACKEND=legacy`,
       {
         _stateDir: stateDir,
         tool_name: toolName,
@@ -201,9 +291,10 @@ try {
     );
   }
 
-  if (backend === "legacy" && !wantsLegacy) {
+  if (backend === "legacy" && wantsOmc) {
     deny(
-      `当前 legacy 后端，请派自研 worker；要用 omc 请设 WORKER_MODE_BACKEND=omc`,
+      `当前 legacy 后端，请派自研 worker；要用 omc 请设 WORKER_MODE_BACKEND=omc` +
+        `（当前检测前缀：${omcPrefix}，来源：${omcSource}）`,
       {
         _stateDir: stateDir,
         tool_name: toolName,
@@ -214,7 +305,7 @@ try {
     );
   }
 
-  // 8. All checks passed → allow.
+  // 9. All checks passed → allow.
   allow();
 } catch {
   // Fail-open: any unhandled exception → allow with empty output.
