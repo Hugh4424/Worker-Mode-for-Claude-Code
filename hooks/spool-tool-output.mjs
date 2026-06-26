@@ -83,14 +83,27 @@ function toolInputPath(toolName, toolInput) {
   if (toolName === "Read") return toolInput.file_path || "";
   if (toolName === "Grep") return toolInput.path || "";
   if (toolName === "Bash") {
-    // Only match path-like tokens (containing "/" or ".worker-mode" style patterns).
-    // Matching the raw command string against bare redline words (e.g. "state") would
-    // exempt any command that happens to contain those words, silently skipping
-    // truncation. Better to under-exempt (worst case: one extra spool) than over-exempt.
+    // Only match tokens that explicitly reference a .worker-mode/ path.
+    // The old check (any token containing "/") was too broad: commands like
+    // `bash scripts/gate-check.sh` returned "scripts/gate-check.sh" which matched
+    // the "gate" redline keyword, causing large non-redline outputs to be silently
+    // skipped. Now we only exempt commands that operate on Worker-Mode state files.
+    //
+    // Additionally, strip leading/trailing quotes from each token before matching so
+    // that quoted paths like `cat ".worker-mode/state/current.json"` are caught.
+    // Variable-assignment tokens like `FILE=.worker-mode/state/x` are caught by the
+    // includes(".worker-mode/") check since the full token contains that substring.
     const cmd = toolInput.command || "";
     const tokens = cmd.split(/\s+/);
-    const pathToken = tokens.find((t) => t.includes("/") || t.startsWith(".worker-mode"));
-    return pathToken || "";
+    const workerModeToken = tokens.find((t) => {
+      const stripped = t.replace(/^["']|["']$/g, "");
+      return (
+        stripped.startsWith(".worker-mode/") ||
+        stripped.includes("/.worker-mode/") ||
+        stripped.includes(".worker-mode/")
+      );
+    });
+    return workerModeToken || "";
   }
   return "";
 }

@@ -905,3 +905,126 @@ test("B2 boundary: context_peak_tokens is null when all orch messages are output
   assert.strictEqual(sessionMetrics.context_peak_tokens, null,
     "context_peak_tokens must be null (not 0) when all orch messages are output-only");
 });
+
+// ── Bug-1: dedup keeps max output_tokens, not first-seen ──────────────────────
+// Three dedup sites: subDeduped (worker), orchDeduped (orch tokens), orchInputDeduped (orch input).
+
+// Bug-1a: subDeduped — worker dedup keeps max output_tokens
+test("Bug-1a: subDeduped keeps max output_tokens (not first-seen snapshot)", () => {
+  const logPath = join(dir, "worker-log.jsonl");
+
+  // Two records for same sub message id:
+  //   snapshot (comes first): output_tokens=1
+  //   final   (comes second): output_tokens=217
+  // Bug: old code kept snapshot (1). Fix: keep max (217).
+  const stdinJson = makeCustomFixture({
+    orchMessages: [
+      {
+        id: "o1",
+        usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        content: [{ type: "text", text: "dispatch" }],
+      },
+    ],
+    subMessages: [
+      // snapshot: same id, output=1 (streaming intermediate)
+      { id: "s1", usage: { input_tokens: 100, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+      // final: same id, output=217
+      { id: "s1", usage: { input_tokens: 100, output_tokens: 217, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+    ],
+  });
+
+  const r = runHook(stdinJson, logPath);
+  assert.equal(r.status, 0, "must exit 0\nstderr: " + r.stderr);
+
+  const rec = readFirstRecord(logPath);
+  // worker_tokens = input(100) + output(217) + cache_read(0) + cache_creation(0) = 317
+  // NOT 101 (which would result from keeping output=1 snapshot)
+  assert.equal(
+    rec.worker_tokens,
+    317,
+    "worker_tokens must use max output_tokens (217), not snapshot (1); got " + rec.worker_tokens
+  );
+});
+
+// Bug-1b: orchDeduped — orchestrator token dedup keeps max output_tokens
+test("Bug-1b: orchDeduped keeps max output_tokens (not first-seen snapshot)", () => {
+  const logPath = join(dir, "worker-log.jsonl");
+
+  // Two records for same orch message id:
+  //   snapshot (first): output_tokens=1
+  //   final  (second): output_tokens=217
+  const stdinJson = makeCustomFixture({
+    orchMessages: [
+      // snapshot
+      {
+        id: "o1",
+        usage: { input_tokens: 50, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        content: [{ type: "text", text: "thinking..." }],
+      },
+      // final
+      {
+        id: "o1",
+        usage: { input_tokens: 50, output_tokens: 217, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        content: [{ type: "text", text: "done" }],
+      },
+    ],
+    subMessages: [
+      { id: "s1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+    ],
+  });
+
+  const r = runHook(stdinJson, logPath);
+  assert.equal(r.status, 0, "must exit 0\nstderr: " + r.stderr);
+
+  const rec = readFirstRecord(logPath);
+  // orchestrator_tokens = input(50) + output(217) + 0 + 0 = 267
+  // NOT 51 (which would result from keeping output=1 snapshot)
+  assert.equal(
+    rec.orchestrator_tokens,
+    267,
+    "orchestrator_tokens must use max output_tokens (217), not snapshot (1); got " + rec.orchestrator_tokens
+  );
+});
+
+// Bug-1c: orchInputDeduped — orchestrator input dedup keeps max output_tokens
+// orchInputDeduped drives orchestrator_input_tokens; same dedup bug applies.
+test("Bug-1c: orchInputDeduped keeps max output_tokens, input_tokens correct", () => {
+  const logPath = join(dir, "worker-log.jsonl");
+
+  // Two records same id: snapshot output=1, final output=217, same input=50
+  // orchestrator_input_tokens must be 50 (from the kept record, not 0 or doubled)
+  const stdinJson = makeCustomFixture({
+    orchMessages: [
+      {
+        id: "o1",
+        usage: { input_tokens: 50, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        content: [{ type: "text", text: "a" }],
+      },
+      {
+        id: "o1",
+        usage: { input_tokens: 50, output_tokens: 217, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+        content: [{ type: "text", text: "b" }],
+      },
+    ],
+    subMessages: [
+      { id: "s1", usage: { input_tokens: 10, output_tokens: 5, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } },
+    ],
+  });
+
+  const r = runHook(stdinJson, logPath);
+  assert.equal(r.status, 0, "must exit 0\nstderr: " + r.stderr);
+
+  const rec = readFirstRecord(logPath);
+  // orchestrator_tokens from orchDeduped = 50+217 = 267 (max output)
+  // orchestrator_input_tokens from orchInputDeduped = 50 (not doubled)
+  assert.equal(
+    rec.orchestrator_tokens,
+    267,
+    "orchDeduped must keep max output: 50+217=267; got " + rec.orchestrator_tokens
+  );
+  assert.equal(
+    rec.orchestrator_input_tokens,
+    50,
+    "orchInputDeduped must not double-count input_tokens; got " + rec.orchestrator_input_tokens
+  );
+});

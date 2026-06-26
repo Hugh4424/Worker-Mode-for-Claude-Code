@@ -497,47 +497,34 @@ for (const [sid, recs] of sessions) {
   orchestratorNewInputRatioBySession[sid] = bestRec !== null ? bestRec.orchestrator_new_input_ratio : null;
 }
 
-// ② compact_count: count .omc/state/checkpoints/checkpoint-*.json files.
-// Prefer to group by session identifier inside each checkpoint JSON. When no
-// session field is present, fall back to global count with scope:"global".
-// Path resolution: CLAUDE_PROJECT_DIR env → cwd.
-function computeCompactCount() {
-  const root = process.env.CLAUDE_PROJECT_DIR || process.cwd();
-  const checkpointDir = [root, ".omc", "state", "checkpoints"].join("/");
-  let files;
+// ② compact_count: scan the transcript for compact-summary records.
+// A compact-summary record is one with isCompactSummary===true (confirmed field name
+// from real Claude Code transcripts) OR type==="summary" (secondary signal).
+// Returns null when no transcript is available (null = "we don't know", 0 = "confirmed 0").
+// The old implementation counted .omc/state/checkpoints/checkpoint-*.json files (OMC
+// snapshots, not real compacts) and has been replaced by this transcript-based approach.
+function computeCompactCount(transcriptPath) {
+  if (!transcriptPath) return null; // no transcript → unknown
+  let lines;
   try {
-    files = readdirSync(checkpointDir).filter((f) => f.startsWith("checkpoint-") && f.endsWith(".json"));
+    lines = readFileSync(transcriptPath, "utf8").split("\n");
   } catch {
-    // Directory does not exist → 0 compacts (graceful)
-    return { count: 0, scope: "global", bySession: {} };
+    return null; // unreadable → unknown
   }
-  // Try to read each file and extract a session identifier.
-  const bySession = {};
-  let ungrouped = 0;
-  for (const f of files) {
-    let sessionId = null;
+  let count = 0;
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) continue;
     try {
-      const content = JSON.parse(readFileSync([checkpointDir, f].join("/"), "utf8"));
-      // Common OMC checkpoint fields for session: session_id, sessionId, sid.
-      sessionId = (content && (content.session_id || content.sessionId || content.sid)) || null;
-    } catch { /* unreadable / malformed → treat as ungrouped */ }
-    if (sessionId) {
-      bySession[sessionId] = (bySession[sessionId] || 0) + 1;
-    } else {
-      ungrouped++;
-    }
+      const rec = JSON.parse(t);
+      if (rec && (rec.isCompactSummary === true || rec.type === "summary")) {
+        count++;
+      }
+    } catch { /* skip malformed */ }
   }
-  const hasGrouped = Object.keys(bySession).length > 0;
-  if (!hasGrouped) {
-    // No session identifiers found in any checkpoint → global count
-    return { count: files.length, scope: "global", bySession: {} };
-  }
-  if (ungrouped > 0) {
-    bySession["__ungrouped__"] = ungrouped;
-  }
-  return { count: files.length, scope: "by_session", bySession };
+  return { count, scope: "transcript" };
 }
-const compactCountResult = computeCompactCount();
+const compactCountResult = computeCompactCount(transcriptArg || null);
 
 // ③ context_composition: take tool_call_composition from the LATEST session_metrics
 // row (by ts) for each session. Each session_metrics row carries a cumulative
@@ -821,17 +808,15 @@ if (json) {
       (tsp === null || tsp === undefined ? "N/A" : tsp.toLocaleString() + " tokens") + "\n");
   }
 
-  // ② compact_count (global across all sessions)
+  // ② compact_count (from transcript scan)
   {
     const cc = compactCountResult;
-    if (cc.count === 0) {
-      process.stdout.write("  [压缩次数]     compact_count: 0 (no checkpoint files found)\n");
-    } else if (cc.scope === "global") {
-      process.stdout.write("  [压缩次数]     compact_count (global): " + cc.count + "\n");
+    if (cc === null) {
+      process.stdout.write("  [压缩次数]     compact_count: null (no transcript provided)\n");
+    } else if (cc.count === 0) {
+      process.stdout.write("  [压缩次数]     compact_count: 0 (no compact-summary records in transcript)\n");
     } else {
-      const byStr = Object.entries(cc.bySession)
-        .map(([s, n]) => s + "=" + n).join(" ");
-      process.stdout.write("  [压缩次数]     compact_count: " + cc.count + " total [" + byStr + "]\n");
+      process.stdout.write("  [压缩次数]     compact_count: " + cc.count + " (transcript)\n");
     }
   }
 

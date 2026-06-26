@@ -575,76 +575,72 @@ test("orchestrator_new_input_ratio: taken from worker record with highest orches
   }
 });
 
-// ── Batch C: compact_count with fixture checkpoint directory ──────────────────
+// ── Batch C: compact_count — updated for transcript-based implementation ───────
+// compact_count now scans the transcript for isCompactSummary=true records instead
+// of counting .omc/state/checkpoints/*.json files (OMC snapshots ≠ real compacts).
 
-test("compact_count: counts checkpoint-*.json files, groups by session_id when present", () => {
+test("compact_count: null when no transcript passed (even if checkpoint dir exists)", () => {
   const tmp = makeTmp();
   try {
-    // Set up a fake .omc/state/checkpoints directory
+    // Set up a fake .omc/state/checkpoints directory (old behavior would have counted these)
     const checkpointDir = join(tmp, ".omc", "state", "checkpoints");
     mkdirSync(checkpointDir, { recursive: true });
-
-    // 2 checkpoints for sess-A, 1 for sess-B, 1 with no session field
     writeFileSync(join(checkpointDir, "checkpoint-001.json"),
       JSON.stringify({ session_id: "sess-A", ts: "2026-01-01T00:01:00.000Z" }));
-    writeFileSync(join(checkpointDir, "checkpoint-002.json"),
-      JSON.stringify({ session_id: "sess-A", ts: "2026-01-01T00:02:00.000Z" }));
-    writeFileSync(join(checkpointDir, "checkpoint-003.json"),
-      JSON.stringify({ session_id: "sess-B", ts: "2026-01-01T00:03:00.000Z" }));
-    writeFileSync(join(checkpointDir, "checkpoint-004.json"),
-      JSON.stringify({ ts: "2026-01-01T00:04:00.000Z" })); // no session_id
 
-    // Worker log: needs at least one worker record so check-metrics doesn't exit(1)
     const workerRow = makeWorkerRecord({ session_id: "sess-A" });
     const logPath = join(tmp, "worker-log.jsonl");
     writeFileSync(logPath, JSON.stringify(workerRow) + "\n");
 
+    // Run WITHOUT --transcript: compact_count must be null (not 1 from checkpoint file)
     const result = spawnSync(
       process.execPath,
       [scriptPath, "--log", logPath, "--json"],
-      {
-        encoding: "utf8",
-        env: { ...process.env, CLAUDE_PROJECT_DIR: tmp },
-      }
+      { encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: tmp } }
     );
     assert.equal(result.status, 0, "exit 0; stderr: " + result.stderr);
     const metrics = JSON.parse(result.stdout.trim());
 
-    const cc = metrics.compact_count;
-    assert.ok(cc !== null && cc !== undefined, "compact_count must be present");
-    assert.equal(cc.count, 4, "compact_count.count must be 4 (all 4 checkpoint files)");
-    assert.equal(cc.scope, "by_session", "scope must be by_session when session_id fields exist");
-    assert.equal(cc.bySession["sess-A"], 2, "sess-A has 2 checkpoints");
-    assert.equal(cc.bySession["sess-B"], 1, "sess-B has 1 checkpoint");
-    assert.equal(cc.bySession["__ungrouped__"], 1, "1 checkpoint with no session_id → __ungrouped__");
+    assert.equal(
+      metrics.compact_count,
+      null,
+      "compact_count must be null without --transcript (checkpoint files are ignored); got " +
+        JSON.stringify(metrics.compact_count)
+    );
   } finally {
     cleanup(tmp);
   }
 });
 
-test("compact_count: returns count=0 when checkpoint directory does not exist", () => {
+test("compact_count: 0 when transcript provided but has no compact-summary records", () => {
   const tmp = makeTmp();
   try {
     const workerRow = makeWorkerRecord({ session_id: "sess-nocheckpoints" });
     const logPath = join(tmp, "worker-log.jsonl");
     writeFileSync(logPath, JSON.stringify(workerRow) + "\n");
 
-    // No .omc/state/checkpoints directory in tmp → count must be 0
+    // Transcript with ordinary records (no isCompactSummary)
+    const transcriptPath = join(tmp, "transcript.jsonl");
+    writeFileSync(transcriptPath,
+      JSON.stringify({ type: "user", message: { role: "user", content: [] }, uuid: "u1" }) + "\n"
+    );
+
     const result = spawnSync(
       process.execPath,
-      [scriptPath, "--log", logPath, "--json"],
-      {
-        encoding: "utf8",
-        env: { ...process.env, CLAUDE_PROJECT_DIR: tmp },
-      }
+      [scriptPath, "--log", logPath, "--transcript", transcriptPath, "--json"],
+      { encoding: "utf8", env: { ...process.env, CLAUDE_PROJECT_DIR: tmp } }
     );
     assert.equal(result.status, 0, "exit 0; stderr: " + result.stderr);
     const metrics = JSON.parse(result.stdout.trim());
 
-    assert.equal(metrics.compact_count.count, 0,
-      "compact_count.count must be 0 when checkpoint directory does not exist");
-    assert.equal(metrics.compact_count.scope, "global",
-      "scope must be 'global' when no files found");
+    assert.notEqual(metrics.compact_count, null, "compact_count must not be null when transcript provided");
+    assert.equal(
+      metrics.compact_count.count,
+      0,
+      "compact_count.count must be 0 when transcript has no compact-summary records; got " +
+        JSON.stringify(metrics.compact_count)
+    );
+    assert.equal(metrics.compact_count.scope, "transcript", "scope must be 'transcript'");
   } finally {
     cleanup(tmp);
   }
@@ -735,6 +731,109 @@ test("orchestrator_new_input_ratio tie-break: same orchestrator_input_tokens tak
       Math.abs(metrics.orchestrator_new_input_ratio[sid] - 0.25) < 1e-9,
       "tie-break: last-encountered record (rec2, ratio=0.25) must win; first-wins would give 0.10; got " +
         metrics.orchestrator_new_input_ratio[sid]
+    );
+  } finally {
+    cleanup(tmp);
+  }
+});
+
+// ── Bug-2: computeCompactCount must scan transcript, not checkpoint files ───────
+
+// Build a minimal compact-summary transcript record (isCompactSummary=true is the
+// real field confirmed from actual Claude Code transcripts).
+function makeCompactRecord({ useIsCompactSummary = true, useTypeSummary = false } = {}) {
+  const rec = {
+    parentUuid: "uuid-parent",
+    isSidechain: false,
+    type: useTypeSummary ? "summary" : "user",
+    message: { role: "user", content: [{ type: "text", text: "Summary of prior context." }] },
+    uuid: "uuid-compact-" + Math.random().toString(36).slice(2),
+    timestamp: "2026-01-01T00:00:00.000Z",
+    sessionId: "sess-compact",
+  };
+  if (useIsCompactSummary) rec.isCompactSummary = true;
+  return rec;
+}
+
+// Bug-2a: transcript with isCompactSummary records → compact_count equals that count
+test("Bug-2a: compact_count counts isCompactSummary=true records in transcript", () => {
+  const tmp = makeTmp();
+  try {
+    const logPath = writeWorkerLog(tmp, [makeWorkerRecord()]);
+    // Write a transcript with 2 compact summary records
+    const transcriptPath = join(tmp, "transcript.jsonl");
+    const recs = [
+      makeCompactRecord({ useIsCompactSummary: true }),
+      makeCompactRecord({ useIsCompactSummary: true }),
+      agentDispatch({ id: "tu-a1" }),
+    ];
+    writeFileSync(transcriptPath, recs.map((r) => JSON.stringify(r)).join("\n") + "\n");
+
+    const result = runMetrics(logPath, ["--transcript", transcriptPath, "--json"]);
+    assert.equal(result.status, 0, "exit 0; stderr: " + result.stderr);
+    const metrics = JSON.parse(result.stdout.trim());
+
+    // compact_count.count must be 2 (transcript scan), not 0 (checkpoint dir, which doesn't exist)
+    assert.ok(metrics.compact_count !== undefined, "compact_count key must exist");
+    assert.equal(
+      metrics.compact_count.count,
+      2,
+      "compact_count.count must equal number of isCompactSummary=true records; got " +
+        JSON.stringify(metrics.compact_count)
+    );
+  } finally {
+    cleanup(tmp);
+  }
+});
+
+// Bug-2b: no transcript passed → compact_count must be null (not 0)
+test("Bug-2b: compact_count is null when no transcript is passed", () => {
+  const tmp = makeTmp();
+  try {
+    const logPath = writeWorkerLog(tmp, [makeWorkerRecord()]);
+
+    // Run WITHOUT --transcript so there is no transcript to scan
+    const result = runMetrics(logPath, ["--json"]);
+    assert.equal(result.status, 0, "exit 0; stderr: " + result.stderr);
+    const metrics = JSON.parse(result.stdout.trim());
+
+    assert.ok(metrics.compact_count !== undefined, "compact_count key must exist");
+    // null = "we don't know" (no transcript); 0 = "confirmed 0 compacts"
+    assert.equal(
+      metrics.compact_count,
+      null,
+      "compact_count must be null when no transcript provided; got " + JSON.stringify(metrics.compact_count)
+    );
+  } finally {
+    cleanup(tmp);
+  }
+});
+
+// Bug-2c: transcript with 0 summary records → compact_count.count = 0 (not null)
+test("Bug-2c: compact_count is 0 when transcript has no summary records", () => {
+  const tmp = makeTmp();
+  try {
+    const logPath = writeWorkerLog(tmp, [makeWorkerRecord()]);
+    const transcriptPath = join(tmp, "transcript.jsonl");
+    // Transcript exists but has no compact-summary records
+    const recs = [agentDispatch({ id: "tu-b1" }), agentResult({ toolUseId: "tu-b1" })];
+    writeFileSync(transcriptPath, recs.map((r) => JSON.stringify(r)).join("\n") + "\n");
+
+    const result = runMetrics(logPath, ["--transcript", transcriptPath, "--json"]);
+    assert.equal(result.status, 0, "exit 0; stderr: " + result.stderr);
+    const metrics = JSON.parse(result.stdout.trim());
+
+    assert.ok(metrics.compact_count !== undefined, "compact_count key must exist");
+    assert.equal(
+      metrics.compact_count.count,
+      0,
+      "compact_count.count must be 0 (confirmed no compacts) when transcript has no summary records; got " +
+        JSON.stringify(metrics.compact_count)
+    );
+    assert.notEqual(
+      metrics.compact_count,
+      null,
+      "compact_count must NOT be null when transcript was provided (null means no transcript)"
     );
   } finally {
     cleanup(tmp);

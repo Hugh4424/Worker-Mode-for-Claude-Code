@@ -240,29 +240,35 @@ const orchAssistantMsgs = orchLines.filter(hasValidUsage);
 // tool_call_composition is a behavioral statistic and must not depend on usage integrity.
 const orchAllAssistantMsgs = orchLines.filter((l) => l && l.type === "assistant" && l.message);
 
-// Dedup by message.id (over the usage-valid set — for token/context metrics)
-const orchSeenIds = new Set();
-const orchDeduped = [];
+// Dedup by message.id (over the usage-valid set — for token/context metrics).
+// Keep the record with the highest output_tokens for each id: streaming produces
+// intermediate snapshots (output=1) before the final value; first-seen would keep
+// the snapshot and severely underestimate output. Taking max output is always correct.
+const orchBestById = new Map();
 for (const l of orchAssistantMsgs) {
-  if (!orchSeenIds.has(l.message.id)) {
-    orchSeenIds.add(l.message.id);
-    orchDeduped.push(l);
+  const id = l.message.id;
+  const out = l.message.usage?.output_tokens ?? 0;
+  if (!orchBestById.has(id) || out > (orchBestById.get(id).message.usage?.output_tokens ?? 0)) {
+    orchBestById.set(id, l);
   }
 }
+const orchDeduped = [...orchBestById.values()];
 
 // Dedup by message.id (over the input-usage set — for input-class metrics only).
 // hasInputUsage guards: only messages with at least one input-side field are included,
 // so output-only messages cannot contribute a spurious 0 to input sums, and
 // cache-only messages (cache_read or cache_creation without input_tokens) are included.
+// Same max-output dedup strategy as orchDeduped.
 const orchInputMsgs = orchLines.filter(hasInputUsage);
-const orchInputSeenIds = new Set();
-const orchInputDeduped = [];
+const orchInputBestById = new Map();
 for (const l of orchInputMsgs) {
-  if (!orchInputSeenIds.has(l.message.id)) {
-    orchInputSeenIds.add(l.message.id);
-    orchInputDeduped.push(l);
+  const id = l.message.id;
+  const out = l.message.usage?.output_tokens ?? 0;
+  if (!orchInputBestById.has(id) || out > (orchInputBestById.get(id).message.usage?.output_tokens ?? 0)) {
+    orchInputBestById.set(id, l);
   }
 }
+const orchInputDeduped = [...orchInputBestById.values()];
 
 // orchestrator_tokens: sum of (input + output + cache_read + cache_creation) per unique message
 let orchestratorTokens = 0;
@@ -371,15 +377,18 @@ try {
 // Only assistant messages with a valid usage object count toward worker metrics.
 const subAssistantMsgs = subLines.filter(hasValidUsage);
 
-// Dedup by message.id
-const subSeenIds = new Set();
-const subDeduped = [];
+// Dedup by message.id, keeping the record with the highest output_tokens for each id.
+// Streaming produces intermediate snapshots (output=1) before the final value; keeping
+// the first-seen record would severely underestimate output_tokens.
+const subBestById = new Map();
 for (const l of subAssistantMsgs) {
-  if (!subSeenIds.has(l.message.id)) {
-    subSeenIds.add(l.message.id);
-    subDeduped.push(l);
+  const id = l.message.id;
+  const out = l.message.usage?.output_tokens ?? 0;
+  if (!subBestById.has(id) || out > (subBestById.get(id).message.usage?.output_tokens ?? 0)) {
+    subBestById.set(id, l);
   }
 }
+const subDeduped = [...subBestById.values()];
 
 // worker_tokens: sum of (input + output + cache_read + cache_creation) per unique message
 let workerTokens = 0;
