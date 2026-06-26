@@ -167,6 +167,10 @@ function parseRawOutput(result) {
   try { return JSON.parse(stdout); } catch { return null; }
 }
 
+function updatedInput(result) {
+  return parseRawOutput(result)?.hookSpecificOutput?.updatedInput;
+}
+
 /** Extract the deny reason from enforce-log.jsonl. */
 function getDenyReason() {
   const entries = readLogEntries();
@@ -208,7 +212,7 @@ test("plugin env, backend=omc, Task dispatch oh-my-claudecode:executor → allow
   const result = runHook({
     hookData: {
       tool_name: "Task",
-      tool_input: { subagent_type: "oh-my-claudecode:executor" },
+      tool_input: { subagent_type: "oh-my-claudecode:executor", prompt: "Do the work." },
       transcript_path: "/tmp/session-main.jsonl",
     },
     backend: "omc",
@@ -217,8 +221,9 @@ test("plugin env, backend=omc, Task dispatch oh-my-claudecode:executor → allow
 
   assert.equal(result.status, 0, "hook must not crash\nstderr: " + result.stderr);
   const parsed = parseRawOutput(result);
-  assert.ok(!parsed || !parsed.hookSpecificOutput,
-    "allow output must NOT contain hookSpecificOutput; got: " + result.stdout);
+  assert.equal(parsed?.hookSpecificOutput?.hookEventName, "PreToolUse");
+  assert.equal(parsed?.hookSpecificOutput?.permissionDecision, "allow");
+  assert.match(updatedInput(result)?.prompt || "", /\[输出限制\]/);
   assert.equal(parseDecision(result), "allow",
     "plugin env: omc dispatch must be allowed\nstdout: " + result.stdout);
 });
@@ -725,4 +730,101 @@ test("not-installed env (empty home) + backend=omc → deny reason=omc_not_insta
     reason.includes("安装") || reason.includes("install") || reason.includes("omc_not_installed"),
     `deny message must contain install hint; got: "${reason}"`
   );
+});
+
+// ── test 23: allowed Task dispatch injects output limit into prompt ──────────
+
+test("allowed Task dispatch → inject output limit into updatedInput.prompt and additionalContext", () => {
+  const fakeHome = makePluginHome();
+
+  const result = runHook({
+    hookData: {
+      tool_name: "Task",
+      tool_input: {
+        subagent_type: "oh-my-claudecode:executor",
+        description: "short task",
+        prompt: "Investigate and report.",
+      },
+      transcript_path: "/tmp/session-main.jsonl",
+    },
+    backend: "omc",
+    fakeHome,
+  });
+
+  assert.equal(parseDecision(result), "allow", "dispatch should be allowed\nstdout: " + result.stdout);
+  const parsed = parseRawOutput(result);
+  assert.equal(parsed?.hookSpecificOutput?.hookEventName, "PreToolUse");
+  assert.equal(parsed?.hookSpecificOutput?.permissionDecision, "allow");
+  assert.equal(updatedInput(result)?.description, "short task");
+  assert.match(updatedInput(result)?.prompt || "", /Investigate and report\./);
+  assert.match(updatedInput(result)?.prompt || "", /\[输出限制\].*2000 字符以内/);
+  assert.match(parsed?.hookSpecificOutput?.additionalContext || "", /\[输出限制\].*2000 字符以内/);
+});
+
+// ── test 24: existing output limit marker is not duplicated ─────────────────
+
+test("prompt already has output limit marker → no duplicate updatedInput", () => {
+  const fakeHome = makePluginHome();
+
+  const result = runHook({
+    hookData: {
+      tool_name: "Task",
+      tool_input: {
+        subagent_type: "oh-my-claudecode:executor",
+        prompt: "Do work.\n\n[输出限制] already present.",
+      },
+      transcript_path: "/tmp/session-main.jsonl",
+    },
+    backend: "omc",
+    fakeHome,
+  });
+
+  assert.equal(parseDecision(result), "allow", "dispatch should be allowed\nstdout: " + result.stdout);
+  assert.equal(updatedInput(result), undefined, "existing marker should avoid duplicate injection");
+});
+
+// ── test 25: WORKER_OUTPUT_LIMIT=off disables prompt injection ──────────────
+
+test("WORKER_OUTPUT_LIMIT=off → allowed Task dispatch has no updatedInput", () => {
+  const fakeHome = makePluginHome();
+
+  const result = runHook({
+    hookData: {
+      tool_name: "Task",
+      tool_input: {
+        subagent_type: "oh-my-claudecode:executor",
+        prompt: "Do work.",
+      },
+      transcript_path: "/tmp/session-main.jsonl",
+    },
+    backend: "omc",
+    fakeHome,
+    extraEnv: { WORKER_OUTPUT_LIMIT: "off" },
+  });
+
+  assert.equal(parseDecision(result), "allow", "dispatch should be allowed\nstdout: " + result.stdout);
+  assert.equal(updatedInput(result), undefined, "off switch should suppress updatedInput");
+});
+
+// ── test 26: WORKER_OUTPUT_LIMIT numeric value overrides default ─────────────
+
+test("WORKER_OUTPUT_LIMIT=4000 → injected prompt uses 4000 chars", () => {
+  const fakeHome = makePluginHome();
+
+  const result = runHook({
+    hookData: {
+      tool_name: "Task",
+      tool_input: {
+        subagent_type: "oh-my-claudecode:executor",
+        prompt: "Do work.",
+      },
+      transcript_path: "/tmp/session-main.jsonl",
+    },
+    backend: "omc",
+    fakeHome,
+    extraEnv: { WORKER_OUTPUT_LIMIT: "4000" },
+  });
+
+  assert.equal(parseDecision(result), "allow", "dispatch should be allowed\nstdout: " + result.stdout);
+  assert.match(updatedInput(result)?.prompt || "", /4000 字符以内/);
 });

@@ -35,9 +35,72 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── allow / deny output helpers ───────────────────────────────────────────────
 
-function allow() {
-  // Output empty object — Claude Code interprets absence of deny as allow.
-  // Do NOT output permissionDecision: "allow"; only deny carries hookSpecificOutput.
+const OUTPUT_LIMIT_MARKER = "[输出限制]";
+const DEFAULT_OUTPUT_LIMIT_CHARS = 2000;
+
+function parseOutputLimit() {
+  const raw = (process.env.WORKER_OUTPUT_LIMIT || "").trim();
+  if (!raw) return DEFAULT_OUTPUT_LIMIT_CHARS;
+  if (raw.toLowerCase() === "off") return null;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_OUTPUT_LIMIT_CHARS;
+}
+
+function hasOutputLimitInstruction(text) {
+  return typeof text === "string" && text.includes(OUTPUT_LIMIT_MARKER);
+}
+
+function buildOutputLimitInstruction(limitChars) {
+  return (
+    `${OUTPUT_LIMIT_MARKER} 你的最终回报请控制在 ${limitChars} 字符以内。` +
+    `如果分析内容超出此限制，先将详细分析写入文件，再在最终回报中只给出结论摘要和文件路径。`
+  );
+}
+
+function buildOutputLimitContext(limitChars) {
+  return (
+    `${OUTPUT_LIMIT_MARKER} 最终回报控制在 ${limitChars} 字符以内。` +
+    `超出部分写入文件，回报只给摘要。`
+  );
+}
+
+function withOutputLimit(hookData) {
+  const limitChars = parseOutputLimit();
+  if (!limitChars) return null;
+
+  const toolInput = hookData?.tool_input;
+  if (!toolInput || typeof toolInput !== "object") return null;
+
+  const prompt = typeof toolInput.prompt === "string" ? toolInput.prompt : "";
+  const alreadyLimited = hasOutputLimitInstruction(prompt);
+  if (alreadyLimited) return null;
+
+  return {
+    ...toolInput,
+    prompt: prompt
+      ? `${prompt}\n\n${buildOutputLimitInstruction(limitChars)}`
+      : buildOutputLimitInstruction(limitChars),
+  };
+}
+
+function allow(hookData) {
+  // Output empty object for plain allow; return an explicit allow only when
+  // we need PreToolUse.updatedInput to rewrite Task/Agent arguments.
+  const updatedInput = withOutputLimit(hookData);
+  if (updatedInput) {
+    process.stdout.write(
+      JSON.stringify({
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "allow",
+          updatedInput,
+          additionalContext: buildOutputLimitContext(parseOutputLimit()),
+        },
+      }) + "\n"
+    );
+    process.exit(0);
+  }
+
   process.stdout.write("{}\n");
   process.exit(0);
 }
@@ -142,13 +205,13 @@ try {
     Boolean(hookData.agent_id) ||
     String(hookData.transcript_path || "").includes("/subagents/");
   if (isSubagent) {
-    allow();
+    allow(hookData);
   }
 
   // 3. Get subagent_type — if missing, allow (nothing to enforce).
   const subagentType = hookData.tool_input?.subagent_type;
   if (!subagentType) {
-    allow();
+    allow(hookData);
   }
 
   // 4. Read backend (default: "omc"). Trim and validate — only "omc" or "legacy"
@@ -249,7 +312,7 @@ try {
       },
       stateDir
     );
-    allow();
+    allow(hookData);
   }
 
   // 7. Marker blocking (codex fix b):
@@ -306,7 +369,7 @@ try {
   }
 
   // 9. All checks passed → allow.
-  allow();
+  allow(hookData);
 } catch {
   // Fail-open: any unhandled exception → allow with empty output.
   process.stdout.write("{}\n");
