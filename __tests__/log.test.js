@@ -227,7 +227,7 @@ test("EC-LOG: assistant messages present but no usage → writes status=incomple
 });
 
 // ── Phase 3 (T014/T016): 3 new fields + per-clause FR-REC-003/004 ────────────
-// New fields (SIG-002): subagent_type, dispatch_input_tokens, summary_return_tokens.
+// New fields (SIG-002): subagent_type, dispatch_input_tokens, summary_return_est_tokens.
 // Membership pinned by STRING LITERALS below (not loop-over-list) so a dropped
 // field reddens. Sources are GROUNDED in real SubagentStop stdin / transcript shape
 // (agent_type, tool_use(name:"Agent") usage, git diff in cwd) — not invented echo
@@ -307,7 +307,7 @@ function makeFixtureWithTokens(idx, { withAgentUsage, withSubOutput, cwd, metaTo
   ];
   // Subagent: final assistant message output_tokens is the subagent's own output —
   // explicitly NOT the orchestrator-side tool_result token (plan L92), so it must NOT
-  // be used as summary_return_tokens. Kept non-null (999) so the F2 falsification can
+  // be used as summary_return_est_tokens. Kept non-null (999) so the F2 falsification can
   // redden if the impl ever falls back to it.
   const sub = [
     { type: "assistant", timestamp: "2026-06-19T10:00:30.000Z", message: { id: "s1", model: "claude-sonnet-4-6", usage: { input_tokens: 3, output_tokens: 63, cache_read_input_tokens: 0, cache_creation_input_tokens: 23745 } } },
@@ -348,11 +348,11 @@ test("T014: appended record contains dispatch_input_tokens (literal membership)"
   assert.ok("dispatch_input_tokens" in rec, "record must contain field 'dispatch_input_tokens'");
 });
 
-test("T014: appended record contains summary_return_tokens (literal membership)", () => {
+test("T014: appended record contains summary_return_est_tokens (literal membership)", () => {
   const logPath = join(dir, "worker-log.jsonl");
   runRecord(makeFixture(), logPath);
   const rec = readFirstRecord(logPath);
-  assert.ok("summary_return_tokens" in rec, "record must contain field 'summary_return_tokens'");
+  assert.ok("summary_return_est_tokens" in rec, "record must contain field 'summary_return_est_tokens'");
 });
 
 test("T014: subagent_type derived from stdin agent_type", () => {
@@ -383,14 +383,14 @@ test("T014: token sources absent → null (NOT 0 — missing-data vs real-zero)"
   const logPath = join(dir, "worker-log.jsonl");
   // makeFixture has NO tool_use(name:"Agent") on the orchestrator side and writes no
   // sibling .meta.json, so dispatch_input_tokens cannot be correlated → null.
-  // summary_return_tokens is always null (orchestrator-side tool_result token is not a
+  // summary_return_est_tokens is always null (orchestrator-side tool_result token is not a
   // recorded field — see F2 test). Both must be null (not 0), distinguishing
   // missing-data from real-zero.
   runRecord(makeFixture(), logPath);
   const rec = readFirstRecord(logPath);
   assert.equal(rec.dispatch_input_tokens, null, "dispatch_input_tokens must be null when no Agent tool_use usage (not 0)");
   assert.notEqual(rec.dispatch_input_tokens, 0, "must distinguish missing-data from real-zero");
-  assert.equal(rec.summary_return_tokens, null, "summary_return_tokens must be null (orchestrator-side tool_result token unrecorded)");
+  assert.equal(rec.summary_return_est_tokens, 12, "summary_return_est_tokens from last_assistant_message 'did the work\\nresult: ok\\nfiles: a.ts, b.ts' = 42 chars / 3.5 ≈ 12");
 });
 
 // F1 (codex blocking) — dispatch_input_tokens must correlate to THIS worker's
@@ -433,20 +433,20 @@ test("F1/T014: dispatch_input_tokens is null when the join key resolves no dispa
   assert.notEqual(rec.dispatch_input_tokens, 6555, "must NOT fall back to the last dispatch's value (toolu_agent2 = 6555)");
 });
 
-// F2 (codex blocking) — summary_return_tokens must be the ORCHESTRATOR-SIDE tool_result
+// F2 (codex blocking) — summary_return_est_tokens must be the ORCHESTRATOR-SIDE tool_result
 // token cost (plan L92), which is NOT present in the real transcript: the orchestrator
 // tool_result content-block carries only {content,is_error,tool_use_id,type} — no token
 // field (verified against a captured session, T013a). The only token-bearing field on
 // the Agent result is the subagent's OWN aggregate self-usage, which is explicitly the
 // forbidden fallback. So when the orchestrator-side tool_result token cannot be
-// extracted, summary_return_tokens MUST be null — never the subagent output_tokens.
+// extracted, summary_return_est_tokens MUST be null — never the subagent output_tokens.
 // The fixture's subagent final output is 999; if the impl wrongly used it, this reddens.
-test("F2/T014: summary_return_tokens is null (orchestrator tool_result token unextractable; NOT subagent output)", () => {
+test("F2/T014: summary_return_est_tokens is computed from lastMsg, not subagent output_tokens", () => {
   const logPath = join(dir, "worker-log.jsonl");
   runRecord(makeFixtureWithTokens("summ", { withAgentUsage: true, withSubOutput: true }), logPath);
   const rec = readFirstRecord(logPath);
-  assert.equal(rec.summary_return_tokens, null, "summary_return_tokens must be null when the orchestrator-side tool_result token is unavailable");
-  assert.notEqual(rec.summary_return_tokens, 999, "must NOT fall back to the subagent's final output_tokens");
+  assert.equal(rec.summary_return_est_tokens, 12, "summary_return_est_tokens computed from lastMsg 'did the work\\nresult: ok\\nfiles: a.ts, b.ts' (42 chars / 3.5 ≈ 12), not subagent output_tokens");
+  assert.notEqual(rec.summary_return_est_tokens, 999, "must NOT fall back to the subagent's final output_tokens");
 });
 
 test("T014 (regression): old-format / incomplete-usage log line does not crash the parser", () => {

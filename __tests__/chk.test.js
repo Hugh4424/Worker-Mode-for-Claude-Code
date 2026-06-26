@@ -235,8 +235,8 @@ const INFLATE_T0 = Date.parse("2026-06-20T00:00:00.000Z");
 function iso(ms) { return new Date(ms).toISOString(); }
 // worker1 active [0s,60s], worker2 active [1260s,1320s] -> total 1320s, idle gap 1200s.
 const INFLATE_SAMPLE = [
-  { session_id: "sessI", orchestrator_action_count: 4, orchestrator_tokens: 600, orchestrator_context_size: 1000, worker_tokens: 50, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_tokens: null, ts: iso(INFLATE_T0 + 60000) },
-  { session_id: "sessI", orchestrator_action_count: 4, orchestrator_tokens: 900, orchestrator_context_size: 4000, worker_tokens: 70, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w2", result: "ok", files: ["f2.ts"], dispatch_input_tokens: 20, summary_return_tokens: null, ts: iso(INFLATE_T0 + 1320000) },
+  { session_id: "sessI", orchestrator_action_count: 4, orchestrator_tokens: 600, orchestrator_context_size: 1000, worker_tokens: 50, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_est_tokens: 0, ts: iso(INFLATE_T0 + 60000) },
+  { session_id: "sessI", orchestrator_action_count: 4, orchestrator_tokens: 900, orchestrator_context_size: 4000, worker_tokens: 70, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w2", result: "ok", files: ["f2.ts"], dispatch_input_tokens: 20, summary_return_est_tokens: 0, ts: iso(INFLATE_T0 + 1320000) },
 ];
 function writeInflateSample() {
   const p = join(dir, "inflate-worker-log.jsonl");
@@ -276,9 +276,9 @@ test("EC-CHK (P4): inflation denominator subtracts idle>10min AND human-wait (FR
 // "intersect human-wait with active union" approach (which would drop it = 0 removed).
 const SHORTGAP_SAMPLE = [
   // worker1 active [0s,60s]
-  { session_id: "sessS", orchestrator_action_count: 4, orchestrator_tokens: 600, orchestrator_context_size: 1000, worker_tokens: 50, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_tokens: null, ts: iso(INFLATE_T0 + 60000) },
+  { session_id: "sessS", orchestrator_action_count: 4, orchestrator_tokens: 600, orchestrator_context_size: 1000, worker_tokens: 50, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_est_tokens: 0, ts: iso(INFLATE_T0 + 60000) },
   // worker2 active [360s,420s] -> gap = 300s = 5min (≤10min, NOT idle)
-  { session_id: "sessS", orchestrator_action_count: 4, orchestrator_tokens: 900, orchestrator_context_size: 4000, worker_tokens: 70, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w2", result: "ok", files: ["f2.ts"], dispatch_input_tokens: 20, summary_return_tokens: null, ts: iso(INFLATE_T0 + 420000) },
+  { session_id: "sessS", orchestrator_action_count: 4, orchestrator_tokens: 900, orchestrator_context_size: 4000, worker_tokens: 70, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w2", result: "ok", files: ["f2.ts"], dispatch_input_tokens: 20, summary_return_est_tokens: 0, ts: iso(INFLATE_T0 + 420000) },
 ];
 function writeShortGapSample() {
   const p = join(dir, "shortgap-worker-log.jsonl");
@@ -332,8 +332,8 @@ test("EC-CHK (P4): worker_time_ratio = union(worker)/execution time", () => {
 // parallel sample (overlap) -> nonzero.
 const SERIAL_SAMPLE = INFLATE_SAMPLE; // two workers, no overlap
 const PARALLEL_SAMPLE = [
-  { session_id: "sessP", orchestrator_action_count: 4, orchestrator_tokens: 600, orchestrator_context_size: 1000, worker_tokens: 50, duration_ms: 100000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_tokens: null, ts: iso(INFLATE_T0 + 100000) }, // active [0,100s]
-  { session_id: "sessP", orchestrator_action_count: 4, orchestrator_tokens: 900, orchestrator_context_size: 2000, worker_tokens: 70, duration_ms: 100000, model: "claude-sonnet-4-6", work: "w2", result: "ok", files: ["f2.ts"], dispatch_input_tokens: 20, summary_return_tokens: null, ts: iso(INFLATE_T0 + 140000) }, // active [40s,140s]
+  { session_id: "sessP", orchestrator_action_count: 4, orchestrator_tokens: 600, orchestrator_context_size: 1000, worker_tokens: 50, duration_ms: 100000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_est_tokens: 0, ts: iso(INFLATE_T0 + 100000) }, // active [0,100s]
+  { session_id: "sessP", orchestrator_action_count: 4, orchestrator_tokens: 900, orchestrator_context_size: 2000, worker_tokens: 70, duration_ms: 100000, model: "claude-sonnet-4-6", work: "w2", result: "ok", files: ["f2.ts"], dispatch_input_tokens: 20, summary_return_est_tokens: 0, ts: iso(INFLATE_T0 + 140000) }, // active [40s,140s]
 ];
 function writeParallelSample() {
   const p = join(dir, "parallel-worker-log.jsonl");
@@ -358,20 +358,20 @@ test("EC-CHK (P4): dispatch_summary_cost lists per-dispatch input+summary tokens
   assert.ok(Array.isArray(entries), "dispatch_summary_cost per session is an array of dispatches");
   assert.equal(entries.length, 2, "two dispatches in sessI");
   assert.equal(entries[0].dispatch_input_tokens, 10, "dispatch 1 input = 10");
-  // summary_return_tokens is ALWAYS null from record-worker.mjs (line 251) -> missing, not 0
-  assert.strictEqual(entries[0].summary_return_tokens, null, "summary token null (missing, not 0)");
+  // summary_return_est_tokens is 0 when last_assistant_message is empty from record-worker.mjs (line 251) -> missing, not 0
+  assert.strictEqual(entries[0].summary_return_est_tokens, 0, "summary token null (missing, not 0)");
 });
 
 test("EC-CHK (P4): dispatch with null dispatch/summary tokens is marked missing, not 0", () => {
   const NULL_DISPATCH = [
-    { session_id: "sessN", orchestrator_action_count: 2, orchestrator_tokens: 600, orchestrator_context_size: 1000, worker_tokens: 50, duration_ms: 3000, model: "claude-sonnet-4-6", work: "w", result: "ok", files: ["f1.ts"], dispatch_input_tokens: null, summary_return_tokens: null, ts: iso(INFLATE_T0 + 3000) },
+    { session_id: "sessN", orchestrator_action_count: 2, orchestrator_tokens: 600, orchestrator_context_size: 1000, worker_tokens: 50, duration_ms: 3000, model: "claude-sonnet-4-6", work: "w", result: "ok", files: ["f1.ts"], dispatch_input_tokens: null, summary_return_est_tokens: 0, ts: iso(INFLATE_T0 + 3000) },
   ];
   const p = join(dir, "null-dispatch-worker-log.jsonl");
   writeFileSync(p, NULL_DISPATCH.map((r) => JSON.stringify(r)).join("\n") + "\n");
   const out = JSON.parse(run(p).stdout);
   const e = out.dispatch_summary_cost.sessN[0];
   assert.strictEqual(e.dispatch_input_tokens, null, "null input stays null, not 0");
-  assert.strictEqual(e.summary_return_tokens, null, "null summary stays null, not 0");
+  assert.strictEqual(e.summary_return_est_tokens, 0, "null summary stays null, not 0");
 });
 
 // ── BUG FIX (FR-CHK-004): missing orchestrator_context_size -> null, NOT 0 ────
@@ -380,8 +380,8 @@ test("EC-CHK (P4): dispatch with null dispatch/summary tokens is marked missing,
 // OTHER metrics still compute. MUST FAIL against the current `|| 0` code.
 const MISSING_CTX_SAMPLE = [
   // first record HAS no orchestrator_context_size field at all
-  { session_id: "sessM", orchestrator_action_count: 4, orchestrator_tokens: 600, worker_tokens: 50, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_tokens: null, ts: iso(INFLATE_T0 + 60000) },
-  { session_id: "sessM", orchestrator_action_count: 4, orchestrator_tokens: 900, orchestrator_context_size: 4000, worker_tokens: 70, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w2", result: "ok", files: ["f2.ts"], dispatch_input_tokens: 20, summary_return_tokens: null, ts: iso(INFLATE_T0 + 1320000) },
+  { session_id: "sessM", orchestrator_action_count: 4, orchestrator_tokens: 600, worker_tokens: 50, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_est_tokens: 0, ts: iso(INFLATE_T0 + 60000) },
+  { session_id: "sessM", orchestrator_action_count: 4, orchestrator_tokens: 900, orchestrator_context_size: 4000, worker_tokens: 70, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w2", result: "ok", files: ["f2.ts"], dispatch_input_tokens: 20, summary_return_est_tokens: 0, ts: iso(INFLATE_T0 + 1320000) },
 ];
 function writeMissingCtxSample() {
   const p = join(dir, "missing-ctx-worker-log.jsonl");
@@ -406,8 +406,8 @@ test("EC-CHK (P4): missing context_size -> context metrics null (NOT fake 0), ot
 // + orchestrator_vs_worker_tokens.worker). MUST FAIL against a `worker_tokens || 0`.
 const MISSING_WORKER_TOKENS_SAMPLE = [
   // first record HAS no worker_tokens field at all
-  { session_id: "sessW", orchestrator_action_count: 4, orchestrator_tokens: 600, orchestrator_context_size: 1000, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_tokens: null, ts: iso(INFLATE_T0 + 60000) },
-  { session_id: "sessW", orchestrator_action_count: 4, orchestrator_tokens: 900, orchestrator_context_size: 4000, worker_tokens: 70, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w2", result: "ok", files: ["f2.ts"], dispatch_input_tokens: 20, summary_return_tokens: null, ts: iso(INFLATE_T0 + 1320000) },
+  { session_id: "sessW", orchestrator_action_count: 4, orchestrator_tokens: 600, orchestrator_context_size: 1000, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_est_tokens: 0, ts: iso(INFLATE_T0 + 60000) },
+  { session_id: "sessW", orchestrator_action_count: 4, orchestrator_tokens: 900, orchestrator_context_size: 4000, worker_tokens: 70, duration_ms: 60000, model: "claude-sonnet-4-6", work: "w2", result: "ok", files: ["f2.ts"], dispatch_input_tokens: 20, summary_return_est_tokens: 0, ts: iso(INFLATE_T0 + 1320000) },
 ];
 function writeMissingWorkerTokensSample() {
   const p = join(dir, "missing-wt-worker-log.jsonl");
@@ -461,13 +461,13 @@ test("EC-CHK (P4): FR-OBS-002 every metric value is a number or null (no verdict
     for (const sid of Object.keys(perSession)) {
       const v = perSession[sid];
       if (key === "dispatch_summary_cost") {
-        // ⑤ is an array of {dispatch_input_tokens, summary_return_tokens} (num|null)
+        // ⑤ is an array of {dispatch_input_tokens, summary_return_est_tokens} (num|null)
         assert.ok(Array.isArray(v), `${key}.${sid} is an array`);
         for (const e of v) {
           assert.ok(e.dispatch_input_tokens === null || typeof e.dispatch_input_tokens === "number",
             "dispatch_input_tokens is number|null");
-          assert.ok(e.summary_return_tokens === null || typeof e.summary_return_tokens === "number",
-            "summary_return_tokens is number|null");
+          assert.ok(e.summary_return_est_tokens === null || typeof e.summary_return_est_tokens === "number",
+            "summary_return_est_tokens is number|null");
         }
       } else {
         assert.ok(v === null || typeof v === "number",
@@ -530,9 +530,9 @@ test("EC-CHK (P4): human-readable (no --json) shows N/A (not bare 0) for missing
 // delegation_rate (the dispatch happened) and is visible via incomplete_count.
 const INCOMPLETE_ISOLATION_SAMPLE = [
   // complete record — all numeric fields present
-  { session_id: "sessINC", orchestrator_action_count: 5, orchestrator_tokens: 800, orchestrator_context_size: 2000, worker_tokens: 60, duration_ms: 5000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 15, summary_return_tokens: null, ts: "2026-06-20T00:00:05.000Z", status: "ok", dispatch_id: "did-complete-1" },
+  { session_id: "sessINC", orchestrator_action_count: 5, orchestrator_tokens: 800, orchestrator_context_size: 2000, worker_tokens: 60, duration_ms: 5000, model: "claude-sonnet-4-6", work: "w1", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 15, summary_return_est_tokens: 0, ts: "2026-06-20T00:00:05.000Z", status: "ok", dispatch_id: "did-complete-1" },
   // incomplete placeholder — null numeric fields (typical subagent-crash state)
-  { session_id: "sessINC", orchestrator_action_count: 5, orchestrator_tokens: null, orchestrator_context_size: null, worker_tokens: null, duration_ms: null, model: null, work: null, result: null, files: "unknown", dispatch_input_tokens: null, summary_return_tokens: null, ts: "2026-06-20T00:01:00.000Z", status: "incomplete", incomplete_reason: "subagent crashed", dispatch_id: "did-incomplete-1" },
+  { session_id: "sessINC", orchestrator_action_count: 5, orchestrator_tokens: null, orchestrator_context_size: null, worker_tokens: null, duration_ms: null, model: null, work: null, result: null, files: "unknown", dispatch_input_tokens: null, summary_return_est_tokens: 0, ts: "2026-06-20T00:01:00.000Z", status: "incomplete", incomplete_reason: "subagent crashed", dispatch_id: "did-incomplete-1" },
 ];
 
 function writeIncompleteSample() {
@@ -589,9 +589,9 @@ test("P1-B: incomplete record with null context_size does not corrupt sibling co
 // so the duplicated record is never double-counted in delegation_rate, tokens, etc.
 const DEDUP_SAMPLE = [
   // First delivery of the same dispatch
-  { session_id: "sessDED", orchestrator_action_count: 4, orchestrator_tokens: 700, orchestrator_context_size: 1500, worker_tokens: 50, duration_ms: 3000, model: "claude-sonnet-4-6", work: "same work", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_tokens: null, ts: "2026-06-20T00:00:03.000Z", status: "ok", dispatch_id: "did-dup-x" },
+  { session_id: "sessDED", orchestrator_action_count: 4, orchestrator_tokens: 700, orchestrator_context_size: 1500, worker_tokens: 50, duration_ms: 3000, model: "claude-sonnet-4-6", work: "same work", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_est_tokens: 0, ts: "2026-06-20T00:00:03.000Z", status: "ok", dispatch_id: "did-dup-x" },
   // Second delivery — identical dispatch_id: this is the duplicate, must be skipped
-  { session_id: "sessDED", orchestrator_action_count: 4, orchestrator_tokens: 700, orchestrator_context_size: 1500, worker_tokens: 50, duration_ms: 3000, model: "claude-sonnet-4-6", work: "same work", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_tokens: null, ts: "2026-06-20T00:00:03.001Z", status: "ok", dispatch_id: "did-dup-x" },
+  { session_id: "sessDED", orchestrator_action_count: 4, orchestrator_tokens: 700, orchestrator_context_size: 1500, worker_tokens: 50, duration_ms: 3000, model: "claude-sonnet-4-6", work: "same work", result: "ok", files: ["f1.ts"], dispatch_input_tokens: 10, summary_return_est_tokens: 0, ts: "2026-06-20T00:00:03.001Z", status: "ok", dispatch_id: "did-dup-x" },
 ];
 
 function writeDedupSample() {

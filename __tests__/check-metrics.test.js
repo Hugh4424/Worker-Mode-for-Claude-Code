@@ -38,7 +38,7 @@ function makeWorkerRecord(overrides = {}) {
     orchestrator_tokens: 500,
     worker_tokens: 200,
     dispatch_input_tokens: 50,
-    summary_return_tokens: 30,
+    summary_return_est_tokens: 30,
     backend: "omc",
     ...overrides,
   };

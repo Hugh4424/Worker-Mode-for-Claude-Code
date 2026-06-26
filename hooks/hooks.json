@@ -1,5 +1,5 @@
 {
-  "description": "Worker-Mode delegation hooks. Enforcement here is backend-routing, not write-blocking. (1) PreToolUse enforce-backend: physically blocks Task calls routed to the wrong backend (deny wrong-backend dispatch + marker-based legacy fallback guard after OMC failure). (2) PostToolUseFailure detect-omc-failure: writes omc-failure.marker when a Task call errors, so enforce-backend can block silent auto-fallback to legacy. (3) SubagentStop record-worker: pure observer, appends one JSONL record per worker. (4) SessionStart check-config: non-blocking WORKER_LOG_PATH reminder. (5) PostToolUse spool-tool-output: observer, spools Bash/Read/Grep output. Write/Edit delegation is enforced structurally via tool-stripping the orchestrator (coordinator.md tools allowlist has no Write/Edit/MultiEdit), not via these hooks.",
+  "description": "Worker-Mode delegation hooks. Enforcement here is backend-routing, not write-blocking. (1) PreToolUse enforce-backend: physically blocks Task calls routed to the wrong backend (deny wrong-backend dispatch + marker-based legacy fallback guard after OMC failure). (2) PostToolUseFailure detect-omc-failure: writes omc-failure.marker when a Task call errors, so enforce-backend can block silent auto-fallback to legacy. (3) SubagentStop record-worker: pure observer, appends one JSONL record per worker. (4) SessionStart check-config: non-blocking WORKER_LOG_PATH reminder. (5) PostToolUse spool-tool-output: observer, spools Bash/Read/Grep output. (6) PostToolUse spool-agent-output: observer, truncates long Task/Agent tool_output, spools full text to disk. Write/Edit delegation is enforced structurally via tool-stripping the orchestrator (coordinator.md tools allowlist has no Write/Edit/MultiEdit), not via these hooks.",
   "hooks": {
     "SessionStart": [
       {
@@ -43,6 +43,16 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/spool-tool-output.mjs\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/spool-agent-output.mjs\"",
             "timeout": 10
           }
         ]

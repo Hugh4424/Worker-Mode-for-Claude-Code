@@ -13,7 +13,7 @@
 // foreman context. Upgrade path: add PostToolUseFailure entry in hooks.json
 // pointing to this same script (payload shape is identical for failure events).
 
-import { readFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, appendFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
 
 // ── stdin ─────────────────────────────────────────────────────────────────────
@@ -68,6 +68,11 @@ const REDLINE_KEYWORDS = [
 // false-negatives from mid-file crops become observable problems.
 const SUMMARY_HEAD_LINES = 20;
 const SUMMARY_TAIL_LINES = 20;
+
+// Retention thresholds
+const SPOOL_MAX_FILES = 100;
+const SPOOL_MAX_BYTES = 50 * 1024 * 1024; // 50 MB
+const SPOOL_CLEANUP_FRACTION = 0.20;      // delete oldest 20%
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -130,6 +135,15 @@ function spoolRoot(cwd) {
   return join(base, ".worker-mode", "state", "tool-output");
 }
 
+// Resolve the event log directory root.
+function eventLogRoot(cwd) {
+  const base =
+    process.env.CLAUDE_PROJECT_DIR ||
+    cwd ||
+    process.cwd();
+  return join(base, ".worker-mode", "spool");
+}
+
 // Build a compact text summary (head + tail + stats).
 function buildSummary(text, totalBytes, spoolPath, toolName, toolResponse) {
   const lines = text.split("\n");
@@ -145,7 +159,7 @@ function buildSummary(text, totalBytes, spoolPath, toolName, toolResponse) {
   } else {
     head = lines.slice(0, SUMMARY_HEAD_LINES);
     tail = lines.slice(-SUMMARY_TAIL_LINES);
-    middle = `\n... [${totalLines - SUMMARY_HEAD_LINES - SUMMARY_TAIL_LINES} lines omitted] ...\n`;
+    middle = `\n...[${totalLines - SUMMARY_HEAD_LINES - SUMMARY_TAIL_LINES} lines omitted] ...\n`;
   }
 
   const parts = [
@@ -176,156 +190,247 @@ function buildSummary(text, totalBytes, spoolPath, toolName, toolResponse) {
   return parts.filter((p) => p !== null && p !== undefined).join("\n");
 }
 
+// ── retention cleanup ─────────────────────────────────────────────────────────
+
+function cleanupSpoolDir(dir) {
+  try {
+    const entries = readdirSync(dir);
+    if (entries.length === 0) return;
+
+    let totalSize = 0;
+    const files = [];
+    for (const name of entries) {
+      const fp = join(dir, name);
+      try {
+        const st = statSync(fp);
+        if (st.isFile()) {
+          files.push({ path: fp, mtime: st.mtimeMs, size: st.size });
+          totalSize += st.size;
+        }
+      } catch {
+        // ignore unreadable entries
+      }
+    }
+
+    const overFiles = files.length > SPOOL_MAX_FILES;
+    const overBytes = totalSize > SPOOL_MAX_BYTES;
+    if (!overFiles && !overBytes) return;
+
+    // Sort oldest first, delete oldest 20% (ceil)
+    files.sort((a, b) => a.mtime - b.mtime);
+    const deleteCount = Math.ceil(files.length * SPOOL_CLEANUP_FRACTION);
+    for (let i = 0; i < deleteCount; i++) {
+      try {
+        unlinkSync(files[i].path);
+      } catch {
+        // ignore unlink failures
+      }
+    }
+
+    process.stderr.write(
+      `[spool-tool-output] retention cleanup: deleted ${deleteCount} oldest files (${overFiles ? "file count" : ""}${overFiles && overBytes ? " + " : ""}${overBytes ? "size" : ""} threshold exceeded)\n`
+    );
+  } catch (e) {
+    process.stderr.write("[spool-tool-output] retention cleanup failed, continuing: " + e.message + "\n");
+  }
+}
+
+// ── event logging ─────────────────────────────────────────────────────────────
+
+function logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath }) {
+  try {
+    const dir = eventLogRoot(cwd);
+    mkdirSync(dir, { recursive: true });
+    const logPath = join(dir, "spool-events.jsonl");
+    const entry = {
+      ts: new Date().toISOString(),
+      tool: toolName,
+      input_bytes: textBytes,
+      input_lines: textLines,
+      action,
+      ...(spoolPath ? { spool_path: spoolPath } : {}),
+    };
+    appendFileSync(logPath, JSON.stringify(entry) + "\n", { encoding: "utf8" });
+  } catch (e) {
+    process.stderr.write("[spool-tool-output] event log failed: " + e.message + "\n");
+  }
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 
 (async () => {
+  let action = "passed_through";
+  let textBytes = 0;
+  let textLines = 0;
+  let spoolPath = null;
+  let cwd = null;
+  let toolName = "";
+
   try {
-  // 1. Read stdin.
-  const payload = readStdin();
-  if (payload === null) {
-    // Parse failure → fail-open, no replacement.
-    process.exit(0);
-  }
-
-  // 2. Escape hatch.
-  const spoolEnv = (process.env.WORKER_OUTPUT_SPOOL || "").trim().toLowerCase();
-  if (spoolEnv === "off" || spoolEnv === "0" || spoolEnv === "false") {
-    process.exit(0);
-  }
-
-  const { session_id, tool_name, tool_input, tool_response, transcript_path, cwd, agent_id } = payload;
-
-  // 3. Subagent exemption: only spool foreman self-reads, not subagent output.
-  if (agent_id) {
-    process.stderr.write("[spool-tool-output] subagent (agent_id present), skipping\n");
-    process.exit(0);
-  }
-  if (typeof transcript_path === "string" && transcript_path.includes("/subagents/")) {
-    process.stderr.write("[spool-tool-output] subagent (transcript_path /subagents/), skipping\n");
-    process.exit(0);
-  }
-
-  // 4. Redline whitelist: authoritative inputs the foreman must see in full.
-  const inputPath = toolInputPath(tool_name, tool_input);
-  if (isRedlinePath(inputPath)) {
-    process.stderr.write("[spool-tool-output] redline path, skipping: " + inputPath + "\n");
-    process.exit(0);
-  }
-
-  // 5. Use classifier to decide if this is a big chunk.
-  // isBigSelfChunk expects { toolUse: {name, input}, result: {bytes, lines, isError} }.
-  // We compute bytes/lines from the actual text field of the tool_response.
-  let textContent = null;
-  let fieldPath = null; // describes which field we'll replace
-
-  if (!tool_response || typeof tool_response !== "object") {
-    process.exit(0);
-  }
-
-  if (tool_name === "Bash") {
-    const stdout = tool_response.stdout;
-    if (typeof stdout === "string") {
-      textContent = stdout;
-      fieldPath = "stdout";
-    }
-  } else if (tool_name === "Read") {
-    const file = tool_response.file;
-    if (file && typeof file === "object" && typeof file.content === "string") {
-      textContent = file.content;
-      fieldPath = "file.content";
-    }
-  } else if (tool_name === "Grep") {
-    const content = tool_response.content;
-    if (typeof content === "string") {
-      textContent = content;
-      fieldPath = "content";
-    }
-  } else {
-    // ponytail: Glob removed from matcher (hooks.json) — filenames lists are rarely
-    // large enough to justify spooling (YAGNI / no-op bloat: disk write without
-    // context reduction). Upgrade path: add "Glob" back to matcher and implement
-    // filenames-array truncation here if glob result sets become observable bloat.
-    //
-    // Unknown tool (or Glob if somehow still routed here) → fail-open.
-    process.exit(0);
-  }
-
-  if (textContent === null) {
-    // Shape not recognised (field missing) → fail-open.
-    process.exit(0);
-  }
-
-  const textBytes = textContent.length;
-  const textLines = textContent.split("\n").length;
-
-  const { isBigSelfRead } = isBigSelfChunk({
-    toolUse: { name: tool_name, input: tool_input || {} },
-    result: { bytes: textBytes, lines: textLines, isError: false },
-  });
-
-  if (!isBigSelfRead) {
-    // Small output, no spooling needed.
-    process.exit(0);
-  }
-
-  // 6. Big chunk: spool original, build summary, shape-preserving replace.
-
-  // a. Spool original to disk.
-  let spoolPath;
-  try {
-    const dir = spoolRoot(cwd);
-    mkdirSync(dir, { recursive: true });
-    const filename = spoolFilename(session_id || "unknown", tool_name);
-    spoolPath = join(dir, filename);
-    writeFileSync(spoolPath, textContent, { encoding: "utf8", mode: 0o600 });
-  } catch (e) {
-    // Write failure → fail-open, no replacement.
-    process.stderr.write("[spool-tool-output] write failed, fail-open: " + e.message + "\n");
-    process.exit(0);
-  }
-
-  // b. Generate summary.
-  const summary = buildSummary(textContent, textBytes, spoolPath, tool_name, tool_response);
-
-  // c. Shape-preserving clone: only overwrite the one text field.
-  let updatedResponse;
-  try {
-    if (fieldPath === "stdout") {
-      // Bash: replace stdout, keep all other fields (stderr, interrupted, isImage, etc.)
-      updatedResponse = { ...tool_response, stdout: summary };
-    } else if (fieldPath === "file.content") {
-      // Read: replace file.content, keep file.filePath and other file fields
-      updatedResponse = {
-        ...tool_response,
-        file: { ...tool_response.file, content: summary },
-      };
-    } else if (fieldPath === "content") {
-      // Grep: replace content, keep mode/numFiles/filenames/numLines
-      updatedResponse = { ...tool_response, content: summary };
-    } else {
-      // fieldPath unrecognised → fail-open.
+    // 1. Read stdin.
+    const payload = readStdin();
+    if (payload === null) {
+      // Parse failure → fail-open, no replacement.
+      logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
       process.exit(0);
     }
-  } catch (e) {
-    process.stderr.write("[spool-tool-output] shape clone failed, fail-open: " + e.message + "\n");
+
+    // 2. Escape hatch.
+    const spoolEnv = (process.env.WORKER_OUTPUT_SPOOL || "").trim().toLowerCase();
+    if (spoolEnv === "off" || spoolEnv === "0" || spoolEnv === "false") {
+      logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
+      process.exit(0);
+    }
+
+    const { session_id, tool_name, tool_input, tool_response, transcript_path, cwd: payloadCwd, agent_id } = payload;
+    cwd = payloadCwd;
+    toolName = tool_name || "";
+
+    // 3. Subagent exemption: only spool foreman self-reads, not subagent output.
+    if (agent_id) {
+      process.stderr.write("[spool-tool-output] subagent (agent_id present), skipping\n");
+      logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
+      process.exit(0);
+    }
+    if (typeof transcript_path === "string" && transcript_path.includes("/subagents/")) {
+      process.stderr.write("[spool-tool-output] subagent (transcript_path /subagents/), skipping\n");
+      logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
+      process.exit(0);
+    }
+
+    // 4. Redline whitelist: authoritative inputs the foreman must see in full.
+    const inputPath = toolInputPath(tool_name, tool_input);
+    if (isRedlinePath(inputPath)) {
+      action = "redline_skip";
+      process.stderr.write("[spool-tool-output] redline path, skipping: " + inputPath + "\n");
+      logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
+      process.exit(0);
+    }
+
+    // 5. Use classifier to decide if this is a big chunk.
+    // isBigSelfChunk expects { toolUse: {name, input}, result: {bytes, lines, isError} }.
+    // We compute bytes/lines from the actual text field of the tool_response.
+    let textContent = null;
+    let fieldPath = null; // describes which field we'll replace
+
+    if (!tool_response || typeof tool_response !== "object") {
+      logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
+      process.exit(0);
+    }
+
+    if (tool_name === "Bash") {
+      const stdout = tool_response.stdout;
+      if (typeof stdout === "string") {
+        textContent = stdout;
+        fieldPath = "stdout";
+      }
+    } else if (tool_name === "Read") {
+      const file = tool_response.file;
+      if (file && typeof file === "object" && typeof file.content === "string") {
+        textContent = file.content;
+        fieldPath = "file.content";
+      }
+    } else if (tool_name === "Grep") {
+      const content = tool_response.content;
+      if (typeof content === "string") {
+        textContent = content;
+        fieldPath = "content";
+      }
+    } else {
+      // ponytail: Glob removed from matcher (hooks.json) — filenames lists are rarely
+      // large enough to justify spooling (YAGNI / no-op bloat: disk write without
+      // context reduction). Upgrade path: add "Glob" back to matcher and implement
+      // filenames-array truncation here if glob result sets become observable bloat.
+      //
+      // Unknown tool (or Glob if somehow still routed here) → fail-open.
+      logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
+      process.exit(0);
+    }
+
+    if (textContent === null) {
+      // Shape not recognised (field missing) → fail-open.
+      logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
+      process.exit(0);
+    }
+
+    textBytes = textContent.length;
+    textLines = textContent.split("\n").length;
+
+    const { isBigSelfRead } = isBigSelfChunk({
+      toolUse: { name: tool_name, input: tool_input || {} },
+      result: { bytes: textBytes, lines: textLines, isError: false },
+    });
+
+    if (!isBigSelfRead) {
+      // Small output, no spooling needed.
+      logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
+      process.exit(0);
+    }
+
+    // 6. Big chunk: spool original, build summary, shape-preserving replace.
+
+    // a. Spool original to disk (with retention cleanup first).
+    try {
+      const dir = spoolRoot(cwd);
+      mkdirSync(dir, { recursive: true });
+      cleanupSpoolDir(dir);
+      const filename = spoolFilename(session_id || "unknown", tool_name);
+      spoolPath = join(dir, filename);
+      writeFileSync(spoolPath, textContent, { encoding: "utf8", mode: 0o600 });
+      action = "spooled";
+    } catch (e) {
+      // Write failure → fail-open, no replacement.
+      process.stderr.write("[spool-tool-output] write failed, fail-open: " + e.message + "\n");
+      logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
+      process.exit(0);
+    }
+
+    // b. Generate summary.
+    const summary = buildSummary(textContent, textBytes, spoolPath, tool_name, tool_response);
+
+    // c. Shape-preserving clone: only overwrite the one text field.
+    let updatedResponse;
+    try {
+      if (fieldPath === "stdout") {
+        // Bash: replace stdout, keep all other fields (stderr, interrupted, isImage, etc.)
+        updatedResponse = { ...tool_response, stdout: summary };
+      } else if (fieldPath === "file.content") {
+        // Read: replace file.content, keep file.filePath and other file fields
+        updatedResponse = {
+          ...tool_response,
+          file: { ...tool_response.file, content: summary },
+        };
+      } else if (fieldPath === "content") {
+        // Grep: replace content, keep mode/numFiles/filenames/numLines
+        updatedResponse = { ...tool_response, content: summary };
+      } else {
+        // fieldPath unrecognised → fail-open.
+        logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
+        process.exit(0);
+      }
+    } catch (e) {
+      process.stderr.write("[spool-tool-output] shape clone failed, fail-open: " + e.message + "\n");
+      logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
+      process.exit(0);
+    }
+
+    // d. Emit single JSON to stdout for Claude Code to consume.
+    // updatedToolOutput must be a JSON string (not the object itself).
+    const out = {
+      hookSpecificOutput: {
+        hookEventName: "PostToolUse",
+        updatedToolOutput: JSON.stringify(updatedResponse),
+      },
+    };
+
+    process.stdout.write(JSON.stringify(out) + "\n");
+    logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
     process.exit(0);
-  }
-
-  // d. Emit single JSON to stdout for Claude Code to consume.
-  // updatedToolOutput must be a JSON string (not the object itself).
-  const out = {
-    hookSpecificOutput: {
-      hookEventName: "PostToolUse",
-      updatedToolOutput: JSON.stringify(updatedResponse),
-    },
-  };
-
-  process.stdout.write(JSON.stringify(out) + "\n");
-  process.exit(0);
   } catch (e) {
     // Outermost catch: any unexpected exception (including isBigSelfChunk not being
     // a function, or other runtime errors) → fail-open, no replacement.
     process.stderr.write("[spool-tool-output] unexpected error, fail-open: " + String(e) + "\n");
+    logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath });
     process.exit(0);
   }
 })();

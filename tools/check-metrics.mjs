@@ -425,8 +425,8 @@ for (const [sid, recs] of sessions) {
   dispatchSummaryCost[sid] = completeRecs.map((r) => ({
     dispatch_input_tokens:
       typeof r.dispatch_input_tokens === "number" ? r.dispatch_input_tokens : null,
-    summary_return_tokens:
-      typeof r.summary_return_tokens === "number" ? r.summary_return_tokens : null,
+    summary_return_est_tokens:
+      typeof r.summary_return_est_tokens === "number" ? r.summary_return_est_tokens : null,
   }));
 
   // ── complete_token_ratio = sum(worker) / (sum(worker) + max(orchestrator)) ───
@@ -715,7 +715,7 @@ if (json) {
     const dscStr = dsc.length === 0
       ? "N/A"
       : dsc
-          .map((e) => "[in=" + na(e.dispatch_input_tokens) + " summary=" + na(e.summary_return_tokens) + "]")
+          .map((e) => "[in=" + na(e.dispatch_input_tokens) + " summary=" + na(e.summary_return_est_tokens) + "]")
           .join(" ");
     process.stdout.write("  dispatch_summary_cost (每次派发 [输入, 摘要] token): " + dscStr + "\n");
     const ic = incompleteCount[sid] || 0;

@@ -19,8 +19,8 @@
 
 // ── exported constants ────────────────────────────────────────────────────────────
 // Shared by all consumers; change here, not in each caller.
-export const BIG_CHUNK_LINES = 150;
-export const BIG_CHUNK_BYTES = 6000;
+export const BIG_CHUNK_LINES = 50;
+export const BIG_CHUNK_BYTES = 4000;
 export const COMPACTION_DROP_TOKENS = 100000;
 
 // ── internal tool sets ────────────────────────────────────────────────────────────

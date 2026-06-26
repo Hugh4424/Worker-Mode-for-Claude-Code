@@ -396,17 +396,20 @@ for (const l of subDeduped) {
   const u = l.message.usage || {};
   workerTokens += (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
 }
-
-// summary_return_tokens (FR-REC-002, metric ⑤): tokens the worker's summary added
-// to the orchestrator context. NOT the worker's own output_tokens (different metric;
-// original bug used that, misreporting internal output as orchestrator cost).
-// CC transcripts (T013a): tool_result block has no token field; only token field on
-// Agent result is subagent's own self-usage — wrong. → null until transcript format
-// exposes this field. null = missing; NOT 0, NOT subagent output_tokens.
-const summaryReturnTokens = null;
+// ── summary return metrics (FR-REC-002, metric ⑤) ────────────────────────────
+// Character-based measurement of the worker's final text injected into the
+// orchestrator context. Claude Code transcripts (T013a) expose no per-message
+// token count for subagent tool_result blocks → we measure chars/bytes, and
+// estimate tokens as chars ÷ 3.5 (standard approximation for mixed code+prose).
+// last_assistant_message is the hook stdin field carrying the worker's final output.
+// All three fields default to 0 when last_assistant_message is empty.
+const summaryReturnChars = lastMsg.length;
+const summaryReturnBytes = Buffer.byteLength(lastMsg, 'utf8');
+const summaryReturnEstTokens = Math.round(lastMsg.length / 3.5);
 
 // model: from the first subagent assistant message that has a model field
 let model = "";
+
 for (const l of subAssistantMsgs) {
   if (l.message.model) { model = l.message.model; break; }
 }
@@ -506,7 +509,9 @@ const partialRecord = {
   subagent_type: subagentType,
   backend,
   dispatch_input_tokens: dispatchInputTokens,
-  summary_return_tokens: summaryReturnTokens,
+  summary_return_chars: summaryReturnChars,
+      summary_return_bytes: summaryReturnBytes,
+      summary_return_est_tokens: summaryReturnEstTokens,
   conflict_marker: conflictMarker,
   dispatch_id: dispatchId,
   ts: new Date().toISOString(),
@@ -559,7 +564,9 @@ const record = {
   subagent_type: subagentType,
   backend,
   dispatch_input_tokens: dispatchInputTokens,
-  summary_return_tokens: summaryReturnTokens,
+  summary_return_chars: summaryReturnChars,
+      summary_return_bytes: summaryReturnBytes,
+      summary_return_est_tokens: summaryReturnEstTokens,
   conflict_marker: conflictMarker,
   // Idempotency key (FR-REC-005): toolUseId from sibling meta.json, or agent
   // transcript filename as fallback. Used by duplicate-suppression check above

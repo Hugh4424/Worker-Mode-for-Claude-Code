@@ -103,8 +103,8 @@ test("BOUNDARY: a 151-line read with NO trailing newline (150 '\\n') is still bi
   // count → this goes RED (bigSelfReads=0).
   const exactly151 = Array(151).fill("z").join("\n"); // 151 lines, 150 "\n", ~301 bytes
   assert.ok(exactly151.length < BIG_CHUNK_BYTES, "fixture must stay under the byte bound");
-  assert.equal((exactly151.match(/\n/g) || []).length, BIG_CHUNK_LINES, "fixture has exactly 150 newline chars");
-  assert.equal(exactly151.split("\n").length, BIG_CHUNK_LINES + 1, "but is 151 real lines");
+  assert.equal((exactly151.match(/\n/g) || []).length, 150, "fixture has exactly 150 newline chars");
+  assert.equal(exactly151.split("\n").length, 151, "but is 151 real lines");
   const t = writeTranscript([
     asst("a1", [{ type: "tool_use", id: "toolu_1", name: "Read", input: { file_path: "/x/edge.ts" } }], { input_tokens: 100, cache_read_input_tokens: 0 }),
     toolResult("toolu_1", 0, { content: exactly151 }),

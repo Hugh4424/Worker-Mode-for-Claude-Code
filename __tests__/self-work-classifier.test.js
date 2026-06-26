@@ -27,8 +27,8 @@ test("constants are exported with correct types and expected values", () => {
   assert.equal(typeof BIG_CHUNK_LINES, "number");
   assert.equal(typeof BIG_CHUNK_BYTES, "number");
   assert.equal(typeof COMPACTION_DROP_TOKENS, "number");
-  assert.equal(BIG_CHUNK_LINES, 150);
-  assert.equal(BIG_CHUNK_BYTES, 6000);
+  assert.equal(BIG_CHUNK_LINES, 50);
+  assert.equal(BIG_CHUNK_BYTES, 4000);
   assert.equal(COMPACTION_DROP_TOKENS, 100000);
 });
 
