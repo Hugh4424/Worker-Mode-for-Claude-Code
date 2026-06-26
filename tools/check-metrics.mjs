@@ -11,7 +11,7 @@
 // Note: review_return_rate 受 extract-gates 保守推断限制，低活跃/短会话大概率 N/A
 // （extract-gates 宁可 unknown 不瞎猜），这是设计权衡不是 bug。
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 // ── args ───────────────────────────────────────────────────────────────────────
@@ -203,10 +203,21 @@ for (const rec of records) {
   deduplicatedRecords.push(rec);
 }
 
-// ── group by session_id ─────────────────────────────────────────────────────
+// ── record-type split (blocking fix: session_metrics must not pollute worker metrics) ─
+// record-worker.mjs appends two kinds of lines to the same JSONL file:
+//   1. per-worker rows      — no `event` field (backward-compat)
+//   2. session_metrics rows — event === "session_metrics"
+// All worker-derived metrics (delegation_rate, worker_token_ratio, etc.) MUST use
+// workerRecords only. Mixing session_metrics rows into worker metric computation
+// causes delegation_rate inflation (extra "records" in numerator), token metrics
+// becoming null (session_metrics carries no worker_tokens/orchestrator_tokens), etc.
+const workerRecords = deduplicatedRecords.filter((r) => r.event == null);
+const sessionMetricRecords = deduplicatedRecords.filter((r) => r.event === "session_metrics");
 
+// ── group by session_id ─────────────────────────────────────────────────────
+// Worker metrics group by session_id over workerRecords only.
 const sessions = new Map();
-for (const rec of deduplicatedRecords) {
+for (const rec of workerRecords) {
   const sid = rec.session_id;
   if (!sid) continue;
   if (!sessions.has(sid)) sessions.set(sid, []);
@@ -225,9 +236,9 @@ if (sessions.size === 0) {
 }
 
 // ── global metrics (pre-loop) ─────────────────────────────────────────────────
-// incomplete_ratio: global fraction of status=incomplete across ALL deduped records.
-const allCount = deduplicatedRecords.length;
-const allIncompleteCount = deduplicatedRecords.filter((r) => r.status === "incomplete").length;
+// incomplete_ratio: global fraction of status=incomplete across ALL worker records.
+const allCount = workerRecords.length;
+const allIncompleteCount = workerRecords.filter((r) => r.status === "incomplete").length;
 const incompleteRatio = allCount > 0 ? allIncompleteCount / allCount : null;
 
 // ── compute metrics per session ───────────────────────────────────────────────
@@ -462,6 +473,103 @@ for (const [sid, recs] of sessions) {
   backendDistribution[sid] = bdist;
 }
 
+// ── Batch C new metrics ───────────────────────────────────────────────────────
+
+// ① orchestrator_new_input_ratio: per-session, from workerRecords.
+// Each record carries the snapshot ratio at that dispatch. We use the max
+// orchestrator_input_tokens record's value as the most representative snapshot
+// (latest-snapshot semantics, same as orchestrator_vs_worker_tokens).
+// null when no records have the field.
+const orchestratorNewInputRatioBySession = {};
+for (const [sid, recs] of sessions) {
+  // Find the record with the highest orchestrator_input_tokens that ALSO carries
+  // a valid orchestrator_new_input_ratio. Skipping records without the ratio field
+  // avoids returning null when the highest-input record lacks the field but a
+  // lower-input record has it (e.g. mixed old/new log entries).
+  let bestRec = null;
+  for (const r of recs) {
+    if (typeof r.orchestrator_input_tokens !== "number") continue;
+    if (typeof r.orchestrator_new_input_ratio !== "number") continue;
+    if (bestRec === null || r.orchestrator_input_tokens >= bestRec.orchestrator_input_tokens) {
+      bestRec = r;
+    }
+  }
+  orchestratorNewInputRatioBySession[sid] = bestRec !== null ? bestRec.orchestrator_new_input_ratio : null;
+}
+
+// ② compact_count: scan the transcript for compact-summary records.
+// A compact-summary record is one with isCompactSummary===true (confirmed field name
+// from real Claude Code transcripts) OR type==="summary" (secondary signal).
+// Returns null when no transcript is available (null = "we don't know", 0 = "confirmed 0").
+// The old implementation counted .omc/state/checkpoints/checkpoint-*.json files (OMC
+// snapshots, not real compacts) and has been replaced by this transcript-based approach.
+function computeCompactCount(transcriptPath) {
+  if (!transcriptPath) return null; // no transcript → unknown
+  let lines;
+  try {
+    lines = readFileSync(transcriptPath, "utf8").split("\n");
+  } catch {
+    return null; // unreadable → unknown
+  }
+  let count = 0;
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const rec = JSON.parse(t);
+      if (rec && (rec.isCompactSummary === true || rec.type === "summary")) {
+        count++;
+      }
+    } catch { /* skip malformed */ }
+  }
+  return { count, scope: "transcript" };
+}
+const compactCountResult = computeCompactCount(transcriptArg || null);
+
+// ③ context_composition: take tool_call_composition from the LATEST session_metrics
+// row (by ts) for each session. Each session_metrics row carries a cumulative
+// snapshot of all tool calls seen up to that point — summing multiple rows would
+// double-count calls already included in earlier snapshots. The newest snapshot is
+// the authoritative total. null when no session_metrics rows exist for the session.
+const contextCompositionBySession = {};
+for (const [sid] of sessions) {
+  const smRecs = sessionMetricRecords.filter((r) => r.session_id === sid);
+  if (smRecs.length === 0) {
+    contextCompositionBySession[sid] = null;
+    continue;
+  }
+  // Find the latest record by ts (lexicographic ISO-8601 comparison is correct).
+  let latestRec = smRecs[0];
+  for (const r of smRecs) {
+    if ((r.ts || "") >= (latestRec.ts || "")) latestRec = r;
+  }
+  const tc = latestRec.tool_call_composition;
+  if (!tc || typeof tc !== "object") {
+    contextCompositionBySession[sid] = null;
+    continue;
+  }
+  contextCompositionBySession[sid] = {
+    bash: typeof tc.bash === "number" ? tc.bash : 0,
+    agent: typeof tc.agent === "number" ? tc.agent : 0,
+    read_only: typeof tc.read_only === "number" ? tc.read_only : 0,
+    other: typeof tc.other === "number" ? tc.other : 0,
+  };
+}
+
+// ④ true_single_turn_peak: max context_peak_tokens across sessionMetricRecords for
+// each session. null when no session_metrics rows exist.
+const trueSingleTurnPeakBySession = {};
+for (const [sid] of sessions) {
+  const smRecs = sessionMetricRecords.filter((r) => r.session_id === sid);
+  let peak = null;
+  for (const r of smRecs) {
+    if (typeof r.context_peak_tokens === "number") {
+      if (peak === null || r.context_peak_tokens > peak) peak = r.context_peak_tokens;
+    }
+  }
+  trueSingleTurnPeakBySession[sid] = peak;
+}
+
 // ── review_return_rate (把关率) = count(return) / count(accept+return) ────────
 // Data source: extract-gates.mjs subprocess, invoked only when --transcript passed.
 // "unknown" does NOT count in denominator.
@@ -565,6 +673,11 @@ const out = {
   // enforce_deny_count > 0 proves the hook fired and blocked at least one dispatch.
   enforce_deny_count: enforceDenyCount,
   enforce_deny_by_reason: enforceDenyByReason,
+  // Batch C new metrics (design 2.3)
+  orchestrator_new_input_ratio: orchestratorNewInputRatioBySession,
+  compact_count: compactCountResult,
+  context_composition: contextCompositionBySession,
+  true_single_turn_peak: trueSingleTurnPeakBySession,
 };
 
 if (json) {
@@ -668,6 +781,43 @@ if (json) {
     const pct = (incompleteRatio * 100).toFixed(1);
     const health = incompleteRatio < 0.1 ? "✓健康" : incompleteRatio > 0.3 ? "⚠红线(>30%)" : "";
     process.stdout.write("  incomplete_ratio (incomplete 占比): " + pct + "% " + health + "\n");
+  }
+
+  // ── Batch C new metrics (design 2.3) ─────────────────────────────────────────
+  process.stdout.write("\n## Batch C Metrics (新增指标)\n");
+  for (const sid of sids) {
+    process.stdout.write("\n[session " + sid + "]\n");
+
+    // ① orchestrator_new_input_ratio
+    const onir = orchestratorNewInputRatioBySession[sid];
+    process.stdout.write("  [新增输入比率] orchestrator_new_input_ratio: " +
+      (onir === null || onir === undefined ? "N/A" : onir.toFixed(4)) + "\n");
+
+    // ③ context_composition
+    const cc = contextCompositionBySession[sid];
+    if (!cc) {
+      process.stdout.write("  [上下文构成]   context_composition: N/A\n");
+    } else {
+      process.stdout.write("  [上下文构成]   context_composition: Bash=" + cc.bash +
+        ", Agent=" + cc.agent + ", ReadOnly=" + cc.read_only + ", Other=" + cc.other + "\n");
+    }
+
+    // ④ true_single_turn_peak
+    const tsp = trueSingleTurnPeakBySession[sid];
+    process.stdout.write("  [单轮峰值]     true_single_turn_peak: " +
+      (tsp === null || tsp === undefined ? "N/A" : tsp.toLocaleString() + " tokens") + "\n");
+  }
+
+  // ② compact_count (from transcript scan)
+  {
+    const cc = compactCountResult;
+    if (cc === null) {
+      process.stdout.write("  [压缩次数]     compact_count: null (no transcript provided)\n");
+    } else if (cc.count === 0) {
+      process.stdout.write("  [压缩次数]     compact_count: 0 (no compact-summary records in transcript)\n");
+    } else {
+      process.stdout.write("  [压缩次数]     compact_count: " + cc.count + " (transcript)\n");
+    }
   }
 
   // enforce_deny metrics (global, from enforce-log.jsonl)

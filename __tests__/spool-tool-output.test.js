@@ -409,3 +409,117 @@ test("⑰ degenerate payload (no tool_name) → fail-open exit 0", () => {
   assert.equal(result.status, 0, "must exit 0 on degenerate payload");
   assert.equal(parseHookOutput(result.stdout), null, "no replacement on degenerate payload");
 });
+
+// ── Bug-3: Bash redline check must use .worker-mode/ token match, not any "/" token ──
+//
+// Before the fix, toolInputPath for Bash returned the first token containing "/",
+// so commands like `bash scripts/gate-check.sh` returned "scripts/gate-check.sh"
+// which matched REDLINE_KEYWORDS ("gate") → false redline → big output not spooled.
+// Worse, any legitimate large output from non-worker-mode Bash commands with paths
+// containing redline words was silently skipped.
+//
+// After the fix: Bash redline only triggers when the command contains a token that
+// starts with ".worker-mode/" or contains "/.worker-mode/".
+
+// Bug-3a: `git status` big output → must be spooled (NOT redline)
+// git status has no "/" tokens at all → was already not redline, stays not redline.
+test("Bug-3a: git status big output → spooled (not redline)", () => {
+  const payload = bashPayload(bigText(200), { tool_input: { command: "git status" } });
+  const r = runHook(payload);
+  assert.equal(r.status, 0, "must exit 0");
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput, "git status big output must be spooled, not skipped as redline");
+});
+
+// Bug-3b: command with path containing "gate" keyword → must be spooled (NOT redline)
+// e.g. `bash scripts/gate-check.sh` previously triggered redline due to "gate" in path.
+test("Bug-3b: Bash with scripts/gate-check.sh path → spooled (not redline)", () => {
+  const payload = bashPayload(bigText(200), { tool_input: { command: "bash scripts/gate-check.sh" } });
+  const r = runHook(payload);
+  assert.equal(r.status, 0, "must exit 0");
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput, "bash scripts/gate-check.sh must be spooled (not redline); got null");
+});
+
+// Bug-3c: `cat .worker-mode/state/current.json` → must NOT be spooled (is redline)
+// After fix: .worker-mode/ token still triggers redline correctly.
+test("Bug-3c: cat .worker-mode/state/current.json → redline, not spooled", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: "cat .worker-mode/state/current.json" },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0, "must exit 0");
+  const out = parseHookOutput(r.stdout);
+  assert.equal(out, null, "cat .worker-mode/state/current.json must be redline → no spool");
+});
+
+// Bug-3d: absolute path to .worker-mode → must still be redline
+test("Bug-3d: Bash with absolute /.worker-mode/ path → redline, not spooled", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: "node /home/user/project/.worker-mode/state/tool-output/dump.txt" },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0, "must exit 0");
+  const out = parseHookOutput(r.stdout);
+  assert.equal(out, null, "absolute /.worker-mode/ path must be redline → no spool");
+});
+
+// ── Bug-3e: quoted / variable-prefix .worker-mode paths (Batch-A supplement) ──
+//
+// toolInputPath Bash branch previously only matched unquoted tokens that started
+// with ".worker-mode/" or contained "/.worker-mode/". These four shapes were missed:
+//   double-quoted:  cat ".worker-mode/state/current.json"
+//   single-quoted:  cat '.worker-mode/state/current.json'
+//   var-assignment: FILE=.worker-mode/state/x cat "$FILE"
+// After the fix, each token is stripped of leading/trailing quotes before matching,
+// and includes(".worker-mode/") catches the variable-assignment prefix.
+
+test("Bug-3e-1: double-quoted .worker-mode path → redline, not spooled", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: 'cat ".worker-mode/state/current.json"' },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0, "must exit 0");
+  const out = parseHookOutput(r.stdout);
+  assert.equal(out, null, 'cat ".worker-mode/..." must be redline → no spool');
+});
+
+test("Bug-3e-2: single-quoted .worker-mode path → redline, not spooled", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: "cat '.worker-mode/state/x'" },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0, "must exit 0");
+  const out = parseHookOutput(r.stdout);
+  assert.equal(out, null, "cat '.worker-mode/...' must be redline → no spool");
+});
+
+test("Bug-3e-3: variable-assignment token with .worker-mode path → redline, not spooled", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: "FILE=.worker-mode/state/x cat $FILE" },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0, "must exit 0");
+  const out = parseHookOutput(r.stdout);
+  assert.equal(out, null, "FILE=.worker-mode/... token must be redline → no spool");
+});
+
+// Regression guard: Bug-3b must remain unaffected — gate-check.sh is NOT redline.
+test("Bug-3e-4: bash scripts/gate-check.sh still NOT redline (Bug-3b regression guard)", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: "bash scripts/gate-check.sh" },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0, "must exit 0");
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput, "scripts/gate-check.sh must still be spooled, not redline");
+});
+
+// Ordinary git status big output → spooled (regression guard for Bug-3a).
+test("Bug-3e-5: git status big output → spooled, not redline (Bug-3a regression guard)", () => {
+  const payload = bashPayload(bigText(200), { tool_input: { command: "git status" } });
+  const r = runHook(payload);
+  assert.equal(r.status, 0, "must exit 0");
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput, "git status must be spooled, not redline");
+});

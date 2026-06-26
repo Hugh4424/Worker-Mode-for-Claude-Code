@@ -105,6 +105,21 @@ function hasValidUsage(l) {
     (typeof l.message.usage.input_tokens === "number" || typeof l.message.usage.output_tokens === "number");
 }
 
+// Input-side usage check: at least one input-side field (input_tokens, cache_creation, or
+// cache_read) is present as a number. Used for input-class metrics (orchestrator_input_tokens,
+// orchestrator_new_input_tokens, orchestrator_new_input_ratio, context_peak) so that
+// messages carrying ONLY output_tokens do not contribute a spurious zero to input sums,
+// and messages with only cache fields are correctly included.
+function hasInputUsage(l) {
+  if (!l || !l.message || !l.message.id || !l.message.usage) return false;
+  const u = l.message.usage;
+  return (
+    typeof u.input_tokens === "number" ||
+    typeof u.cache_creation_input_tokens === "number" ||
+    typeof u.cache_read_input_tokens === "number"
+  );
+}
+
 // ── stdin ─────────────────────────────────────────────────────────────────────
 
 function readStdin() {
@@ -221,19 +236,39 @@ try {
 }
 // Only assistant messages with a valid usage object count toward session metrics.
 const orchAssistantMsgs = orchLines.filter(hasValidUsage);
-// Tool-use action counting needs assistant messages regardless of usage, but we
-// dedup/count over the SAME valid-usage set so a usage-less message cannot inflate
-// or zero out the picture inconsistently; action count is derived below from this set.
+// All orchestrator assistant messages (regardless of usage) for tool-use counting.
+// tool_call_composition is a behavioral statistic and must not depend on usage integrity.
+const orchAllAssistantMsgs = orchLines.filter((l) => l && l.type === "assistant" && l.message);
 
-// Dedup by message.id
-const orchSeenIds = new Set();
-const orchDeduped = [];
+// Dedup by message.id (over the usage-valid set — for token/context metrics).
+// Keep the record with the highest output_tokens for each id: streaming produces
+// intermediate snapshots (output=1) before the final value; first-seen would keep
+// the snapshot and severely underestimate output. Taking max output is always correct.
+const orchBestById = new Map();
 for (const l of orchAssistantMsgs) {
-  if (!orchSeenIds.has(l.message.id)) {
-    orchSeenIds.add(l.message.id);
-    orchDeduped.push(l);
+  const id = l.message.id;
+  const out = l.message.usage?.output_tokens ?? 0;
+  if (!orchBestById.has(id) || out > (orchBestById.get(id).message.usage?.output_tokens ?? 0)) {
+    orchBestById.set(id, l);
   }
 }
+const orchDeduped = [...orchBestById.values()];
+
+// Dedup by message.id (over the input-usage set — for input-class metrics only).
+// hasInputUsage guards: only messages with at least one input-side field are included,
+// so output-only messages cannot contribute a spurious 0 to input sums, and
+// cache-only messages (cache_read or cache_creation without input_tokens) are included.
+// Same max-output dedup strategy as orchDeduped.
+const orchInputMsgs = orchLines.filter(hasInputUsage);
+const orchInputBestById = new Map();
+for (const l of orchInputMsgs) {
+  const id = l.message.id;
+  const out = l.message.usage?.output_tokens ?? 0;
+  if (!orchInputBestById.has(id) || out > (orchInputBestById.get(id).message.usage?.output_tokens ?? 0)) {
+    orchInputBestById.set(id, l);
+  }
+}
+const orchInputDeduped = [...orchInputBestById.values()];
 
 // orchestrator_tokens: sum of (input + output + cache_read + cache_creation) per unique message
 let orchestratorTokens = 0;
@@ -241,6 +276,27 @@ for (const l of orchDeduped) {
   const u = l.message.usage || {};
   orchestratorTokens += (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
 }
+
+// orchestrator_input_tokens: pure-input context (input + cache_creation + cache_read) per unique message
+// orchestrator_new_input_tokens: non-cache-read new input (input + cache_creation) per unique message
+// orchestrator_new_input_ratio: new input / total input (null when denominator is 0)
+// These are pure input-side metrics; output_tokens is intentionally excluded.
+// Uses orchInputDeduped (not orchDeduped): hasInputUsage ensures only messages with at
+// least one input-side field are included — output-only messages are excluded to prevent
+// a spurious true-0 from polluting the input sum, and cache-only messages are included.
+let orchestratorInputTokens = 0;
+let orchestratorNewInputTokens = 0;
+for (const l of orchInputDeduped) {
+  const u = l.message.usage || {};
+  const inp = typeof u.input_tokens === "number" ? u.input_tokens : 0;
+  const cacheCreate = typeof u.cache_creation_input_tokens === "number" ? u.cache_creation_input_tokens : 0;
+  const cacheRead = typeof u.cache_read_input_tokens === "number" ? u.cache_read_input_tokens : 0;
+  orchestratorInputTokens += inp + cacheCreate + cacheRead;
+  orchestratorNewInputTokens += inp + cacheCreate;
+}
+const orchestratorNewInputRatio = orchestratorInputTokens > 0
+  ? orchestratorNewInputTokens / orchestratorInputTokens
+  : null;
 
 // orchestrator_action_count: count DISTINCT tool_use blocks across ALL (pre-dedup)
 // assistant messages. CC splits one turn across multiple lines sharing message.id
@@ -321,15 +377,18 @@ try {
 // Only assistant messages with a valid usage object count toward worker metrics.
 const subAssistantMsgs = subLines.filter(hasValidUsage);
 
-// Dedup by message.id
-const subSeenIds = new Set();
-const subDeduped = [];
+// Dedup by message.id, keeping the record with the highest output_tokens for each id.
+// Streaming produces intermediate snapshots (output=1) before the final value; keeping
+// the first-seen record would severely underestimate output_tokens.
+const subBestById = new Map();
 for (const l of subAssistantMsgs) {
-  if (!subSeenIds.has(l.message.id)) {
-    subSeenIds.add(l.message.id);
-    subDeduped.push(l);
+  const id = l.message.id;
+  const out = l.message.usage?.output_tokens ?? 0;
+  if (!subBestById.has(id) || out > (subBestById.get(id).message.usage?.output_tokens ?? 0)) {
+    subBestById.set(id, l);
   }
 }
+const subDeduped = [...subBestById.values()];
 
 // worker_tokens: sum of (input + output + cache_read + cache_creation) per unique message
 let workerTokens = 0;
@@ -434,6 +493,9 @@ const partialRecord = {
   session_id: sessionId,
   orchestrator_action_count: orchAssistantMsgs.length > 0 ? orchestratorActionCount : null,
   orchestrator_tokens: orchAssistantMsgs.length > 0 ? orchestratorTokens : null,
+  orchestrator_input_tokens: orchAssistantMsgs.length > 0 ? orchestratorInputTokens : null,
+  orchestrator_new_input_tokens: orchAssistantMsgs.length > 0 ? orchestratorNewInputTokens : null,
+  orchestrator_new_input_ratio: orchAssistantMsgs.length > 0 ? orchestratorNewInputRatio : null,
   orchestrator_context_size: orchAssistantMsgs.length > 0 ? orchestratorContextSize : null,
   worker_tokens: subAssistantMsgs.length > 0 ? workerTokens : null,
   duration_ms: allTimestamps.length >= 2 ? durationMs : null,
@@ -482,6 +544,9 @@ const record = {
   session_id: sessionId,
   orchestrator_action_count: orchestratorActionCount,
   orchestrator_tokens: orchestratorTokens,
+  orchestrator_input_tokens: orchestratorInputTokens,
+  orchestrator_new_input_tokens: orchestratorNewInputTokens,
+  orchestrator_new_input_ratio: orchestratorNewInputRatio,
   orchestrator_context_size: orchestratorContextSize,
   // WORKER fields
   worker_tokens: workerTokens,
@@ -521,6 +586,54 @@ if (RUN_TIMEOUT_MS === 0 || elapsedMs > RUN_TIMEOUT_MS) {
     "ms > " + RUN_TIMEOUT_MS + "ms); no record appended");
 }
 
+// ── session_metrics (B2) — computed from the same orchDeduped set ────────────
+// context_peak_tokens: max single-turn total input across all orch messages
+// (formula: input_tokens + cache_creation_input_tokens + cache_read_input_tokens,
+// same as orchestrator_input_tokens per-turn, reflecting true context burden).
+// We use orchInputDeduped (deduped by message.id, input-side fields present) so
+// output-only messages (turnTotal=0) do not participate in the peak — consistent
+// with the input/new_input fields that also use orchInputDeduped.
+// When orchInputDeduped is empty (no input-side data at all), we record null
+// (not 0) to signal "no input-side data available" rather than a fake zero.
+let contextPeakTokens = null;
+for (const l of orchInputDeduped) {
+  const u = l.message.usage || {};
+  const inp = typeof u.input_tokens === "number" ? u.input_tokens : 0;
+  const cacheCreate = typeof u.cache_creation_input_tokens === "number" ? u.cache_creation_input_tokens : 0;
+  const cacheRead = typeof u.cache_read_input_tokens === "number" ? u.cache_read_input_tokens : 0;
+  const turnTotal = inp + cacheCreate + cacheRead;
+  if (contextPeakTokens === null || turnTotal > contextPeakTokens) contextPeakTokens = turnTotal;
+}
+
+// tool_call_composition: count distinct tool_use blocks across ALL orchestrator
+// assistant messages (orchAllAssistantMsgs, not orchAssistantMsgs), classified
+// by tool name. Tool composition is a behavioral statistic that must not depend
+// on usage completeness — a tool_use block without usage would be silently missed
+// if we restricted to the usage-valid set.
+// Bash → bash; Task|Agent → agent; Read|Grep|Glob → read_only; else → other.
+const seenToolUseIdsForComposition = new Set();
+const toolCallComposition = { bash: 0, agent: 0, read_only: 0, other: 0 };
+for (const l of orchAllAssistantMsgs) {
+  const content = l.message.content || [];
+  for (const block of content) {
+    if (!block || block.type !== "tool_use") continue;
+    if (block.id) {
+      if (seenToolUseIdsForComposition.has(block.id)) continue;
+      seenToolUseIdsForComposition.add(block.id);
+    }
+    const name = block.name || "";
+    if (name === "Bash") {
+      toolCallComposition.bash++;
+    } else if (name === "Task" || name === "Agent") {
+      toolCallComposition.agent++;
+    } else if (name === "Read" || name === "Grep" || name === "Glob") {
+      toolCallComposition.read_only++;
+    } else {
+      toolCallComposition.other++;
+    }
+  }
+}
+
 // ── atomic append (FR-LOG-004/005: concurrency-safe) ─────────────────────────
 // O_APPEND flag on POSIX: each write() is positioned at end atomically by the kernel.
 // A single write of one JSON line (≤ PIPE_BUF on most systems) is guaranteed atomic.
@@ -537,6 +650,25 @@ try {
   writeSync(fd, buf);
 } finally {
   closeSync(fd);
+}
+
+// ── session_metrics event (B2) — append as independent record after per-worker ─
+// Consumers distinguish this from per-worker rows by event=="session_metrics".
+// Per-worker rows do NOT get an event field (backward compatibility preserved).
+const sessionMetricsRecord = {
+  event: "session_metrics",
+  session_id: sessionId,
+  context_peak_tokens: contextPeakTokens,
+  tool_call_composition: toolCallComposition,
+  ts: new Date().toISOString(),
+};
+const sessionMetricsLine = JSON.stringify(sessionMetricsRecord) + "\n";
+const smBuf = Buffer.from(sessionMetricsLine, "utf8");
+const smFd = openSync(workerLogPath, "a");
+try {
+  writeSync(smFd, smBuf);
+} finally {
+  closeSync(smFd);
 }
 
 process.exit(0);
