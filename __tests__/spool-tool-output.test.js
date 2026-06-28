@@ -169,7 +169,8 @@ test("③ big Bash output → spooled; updatedToolOutput preserves shape", () =>
   assert.ok(out.hookSpecificOutput, "should have hookSpecificOutput");
   assert.equal(out.hookSpecificOutput.hookEventName, "PostToolUse");
 
-  const updated = JSON.parse(out.hookSpecificOutput.updatedToolOutput);
+  const updated = out.hookSpecificOutput.updatedToolOutput;
+  // updatedToolOutput is now the raw object (not JSON-stringified)
   // stdout replaced with summary
   assert.ok(typeof updated.stdout === "string", "stdout must be a string");
   assert.ok(updated.stdout.includes("[spool-tool-output:"), "stdout should be summary");
@@ -192,7 +193,8 @@ test("④ big Read output → file.content replaced, filePath preserved", () => 
   assert.ok(out && out.hookSpecificOutput);
   assert.equal(out.hookSpecificOutput.hookEventName, "PostToolUse");
 
-  const updated = JSON.parse(out.hookSpecificOutput.updatedToolOutput);
+  const updated = out.hookSpecificOutput.updatedToolOutput;
+  // updatedToolOutput is now the raw object (not JSON-stringified)
   assert.ok(typeof updated.file === "object", "file field present");
   assert.equal(updated.file.filePath, filePath, "filePath unchanged");
   assert.ok(updated.file.content.includes("[spool-tool-output:"), "content replaced with summary");
@@ -209,14 +211,16 @@ test("⑤ big Grep output → content replaced, metadata preserved", () => {
   const out = parseHookOutput(r.stdout);
   assert.ok(out && out.hookSpecificOutput);
 
-  const updated = JSON.parse(out.hookSpecificOutput.updatedToolOutput);
+  const updated = out.hookSpecificOutput.updatedToolOutput;
+  // updatedToolOutput is now the raw object (not JSON-stringified)
   assert.ok(updated.content.includes("[spool-tool-output:"), "content replaced");
   assert.equal(updated.numFiles, 5, "numFiles preserved");
   assert.deepEqual(updated.filenames, ["a.ts", "b.ts"], "filenames preserved");
 });
 
-// ⑥ Redline paths → no replacement (full content passes through).
-test("⑥a redline path current.json → no replacement", () => {
+// ⑥ Redline paths (.worker-mode/ directory segment, regex-based) → no replacement.
+test("⑥a redline path .worker-mode/state/current.json → no replacement", () => {
+  // Exempt via .worker-mode directory-segment regex, not keyword.
   const r = runHook(readPayload(bigText(200), "/project/.worker-mode/state/current.json"));
   assert.equal(r.status, 0);
   assert.equal(parseHookOutput(r.stdout), null, "redline path must not be spooled");
@@ -228,10 +232,12 @@ test("⑥b redline path .worker-mode → no replacement", () => {
   assert.equal(parseHookOutput(r.stdout), null);
 });
 
-test("⑥c redline keyword contract in path → no replacement", () => {
+// contract.md is NO LONGER redline — keyword model replaced by directory-segment regex.
+test("⑥c contract.md no longer redline → spooled", () => {
   const r = runHook(readPayload(bigText(200), "/project/agents/contract.md"));
   assert.equal(r.status, 0);
-  assert.equal(parseHookOutput(r.stdout), null);
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput, "contract.md must now be spooled (keyword model removed)");
 });
 
 // ⑦ Subagent exemption via agent_id field.
@@ -285,7 +291,8 @@ test("⑪ big Bash with stderr → summary preserves stderr content", () => {
   const out = parseHookOutput(r.stdout);
   assert.ok(out && out.hookSpecificOutput);
 
-  const updated = JSON.parse(out.hookSpecificOutput.updatedToolOutput);
+  const updated = out.hookSpecificOutput.updatedToolOutput;
+  // updatedToolOutput is now the raw object (not JSON-stringified)
   // The summary in stdout should include the preserved stderr section.
   assert.ok(updated.stdout.includes("=== STDERR (preserved) ==="), "stderr section present in summary");
   assert.ok(updated.stdout.includes("module not found"), "stderr content visible in summary");
@@ -340,7 +347,8 @@ test("⑭ big Bash → spool file exists on disk with full original content", ()
   assert.ok(out && out.hookSpecificOutput, "must have hookSpecificOutput");
 
   // Extract the spool path from the summary text.
-  const updated = JSON.parse(out.hookSpecificOutput.updatedToolOutput);
+  const updated = out.hookSpecificOutput.updatedToolOutput;
+  // updatedToolOutput is now the raw object (not JSON-stringified)
   const summaryText = updated.stdout;
   const match = summaryText.match(/Full output: (.+\.txt)/);
   assert.ok(match, "summary must contain spool file path");
@@ -420,6 +428,8 @@ test("⑰ degenerate payload (no tool_name) → fail-open exit 0", () => {
 //
 // After the fix: Bash redline only triggers when the command contains a token that
 // starts with ".worker-mode/" or contains "/.worker-mode/".
+// B2 refactor: isRedlinePath now uses a directory-segment regex — Bash token
+// extraction unchanged; the regex replaces the keyword-based isRedlinePath.
 
 // Bug-3a: `git status` big output → must be spooled (NOT redline)
 // git status has no "/" tokens at all → was already not redline, stays not redline.
@@ -462,6 +472,50 @@ test("Bug-3d: Bash with absolute /.worker-mode/ path → redline, not spooled", 
   assert.equal(r.status, 0, "must exit 0");
   const out = parseHookOutput(r.stdout);
   assert.equal(out, null, "absolute /.worker-mode/ path must be redline → no spool");
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// Bug-5: updatedToolOutput must be an OBJECT matching Claude Code schema,
+// not a JSON string. (CC rejects strings: "expected object, received string".)
+// ══════════════════════════════════════════════════════════════════════════════════
+test("Bug-5a: updatedToolOutput is an object, not a string (Bash)", () => {
+  const r = runHook(bashPayload(bigText(200)));
+  assert.equal(r.status, 0);
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput, "must have hookSpecificOutput");
+
+  const uto = out.hookSpecificOutput.updatedToolOutput;
+  assert.equal(typeof uto, "object", "updatedToolOutput must be an object, not a string");
+
+  // It must parse as the tool response shape — no double-parse needed
+  assert.ok(typeof uto.stdout === "string", "stdout must be a string");
+  assert.ok(uto.stdout.includes("[spool-tool-output:"), "stdout should be summary");
+});
+
+test("Bug-5b: updatedToolOutput is an object, not a string (Read)", () => {
+  const r = runHook(readPayload(bigText(200)));
+  assert.equal(r.status, 0);
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput);
+
+  const uto = out.hookSpecificOutput.updatedToolOutput;
+  assert.equal(typeof uto, "object", "updatedToolOutput must be an object, not a string");
+
+  assert.ok(typeof uto.file === "object", "file field present");
+  assert.ok(uto.file.content.includes("[spool-tool-output:"), "content replaced");
+});
+
+test("Bug-5c: updatedToolOutput is an object, not a string (Grep)", () => {
+  const r = runHook(grepPayload(bigText(200)));
+  assert.equal(r.status, 0);
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput);
+
+  const uto = out.hookSpecificOutput.updatedToolOutput;
+  assert.equal(typeof uto, "object", "updatedToolOutput must be an object, not a string");
+
+  assert.ok(typeof uto.content === "string", "content must be a string");
+  assert.ok(uto.content.includes("[spool-tool-output:"), "content replaced");
 });
 
 // ── Bug-3e: quoted / variable-prefix .worker-mode paths (Batch-A supplement) ──
@@ -522,4 +576,225 @@ test("Bug-3e-5: git status big output → spooled, not redline (Bug-3a regressio
   assert.equal(r.status, 0, "must exit 0");
   const out = parseHookOutput(r.stdout);
   assert.ok(out && out.hookSpecificOutput, "git status must be spooled, not redline");
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// B2: Directory-segment boundary tests for isRedlinePath regex
+// (.worker-mode must be a full directory segment, not part of a longer name)
+// ══════════════════════════════════════════════════════════════════════════════════
+
+// ── B2-NOT: paths that should be SPOOLED (keyword model would have exempted) ──
+
+test("B2-NOT-1: Read /src/state-manager.ts → spooled", () => {
+  // "state" was a keyword, now not exempt — .worker-mode/ not in path.
+  const r = runHook(readPayload(bigText(200), "/src/state-manager.ts"));
+  assert.equal(r.status, 0);
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput, "/src/state-manager.ts must be spooled");
+});
+
+test("B2-NOT-2: Read /docs/progress-report.md → spooled", () => {
+  // "progress" was a keyword, now not exempt.
+  const r = runHook(readPayload(bigText(200), "/docs/progress-report.md"));
+  assert.equal(r.status, 0);
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput, "/docs/progress-report.md must be spooled");
+});
+
+test("B2-NOT-3: Grep path=/docs/reviews/ → spooled", () => {
+  // "reviews" was a keyword, now not exempt.
+  const r = runHook(grepPayload(bigText(200), "/docs/reviews/"));
+  assert.equal(r.status, 0);
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput, "Grep /docs/reviews/ must be spooled");
+});
+
+test("B2-NOT-4: Read /scripts/gate-check.sh → spooled", () => {
+  // "gate" was a keyword, now not exempt.
+  const r = runHook(readPayload(bigText(200), "/scripts/gate-check.sh"));
+  assert.equal(r.status, 0);
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput, "/scripts/gate-check.sh must be spooled");
+});
+
+test("B2-NOT-5: Read .worker-mode-backup/x.md → spooled", () => {
+  // .worker-mode-backup is NOT a directory segment match — regex requires / before/after.
+  const r = runHook(readPayload(bigText(200), "/tmp/foo.worker-mode-backup/x.md"));
+  assert.equal(r.status, 0);
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput, ".worker-mode-backup must be spooled (not a dir segment)");
+});
+
+test("B2-NOT-6: Read .worker-mode-old/x.md → spooled", () => {
+  // .worker-mode-old is NOT a directory segment match.
+  const r = runHook(readPayload(bigText(200), "/tmp/.worker-mode-old/x.md"));
+  assert.equal(r.status, 0);
+  const out = parseHookOutput(r.stdout);
+  assert.ok(out && out.hookSpecificOutput, ".worker-mode-old must be spooled (not a dir segment)");
+});
+
+// ── B2-EXEMPT: paths that should NOT be spooled (redline) ──
+
+test("B2-EXEMPT-1: Read /project/.worker-mode/state/current.json → not spooled", () => {
+  const r = runHook(readPayload(bigText(200), "/project/.worker-mode/state/current.json"));
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, ".worker-mode/state/current.json must be redline");
+});
+
+test("B2-EXEMPT-2: Read .worker-mode/state/artifacts.jsonl → not spooled", () => {
+  const r = runHook(readPayload(bigText(200), ".worker-mode/state/artifacts.jsonl"));
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, ".worker-mode/state/artifacts.jsonl must be redline");
+});
+
+test("B2-EXEMPT-3: Read .worker-mode/state/findings/x.md → not spooled", () => {
+  const r = runHook(readPayload(bigText(200), ".worker-mode/state/findings/x.md"));
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, ".worker-mode/state/findings/x.md must be redline");
+});
+
+test("B2-EXEMPT-4: Grep path=.worker-mode/state/ → not spooled", () => {
+  const r = runHook(grepPayload(bigText(200), ".worker-mode/state/"));
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "Grep .worker-mode/state/ must be redline");
+});
+
+test("B2-EXEMPT-5: Bash FILE=.worker-mode/state/x → not spooled", () => {
+  // Env-assignment token still matched via = boundary in regex.
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: "FILE=.worker-mode/state/x cat $FILE" },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "FILE=.worker-mode/state/x must be redline");
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// Codex 二审 Blocking 1: quoted env assignment漏豁免
+// FILE="..." 内部引号导致不再命中 regex，被错误 spool。
+// 修法: 规范化 token 时把内部引号也去掉。
+// ══════════════════════════════════════════════════════════════════════════════════
+
+test("Blocking1-a: FILE=\".worker-mode/state/x\" cat \"$FILE\" → not spooled", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: 'FILE=".worker-mode/state/x" cat "$FILE"' },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "FILE=\"...\" must be redline → no spool");
+});
+
+test("Blocking1-b: FILE='.worker-mode/state/x' cat \"$FILE\" → not spooled", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: "FILE='.worker-mode/state/x' cat \"$FILE\"" },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "FILE='...' must be redline → no spool");
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// Codex 二审 Blocking 2: 方向反转 — 撤负向过滤，宽松匹配
+// 这些场景在宽松匹配下会被豁免（不 spool）—— 接受的已知误豁免。
+// 宁可误豁免（损失少量 spool 覆盖率），不可漏豁免（截断工头状态读取）。
+// ══════════════════════════════════════════════════════════════════════════════════
+
+test("Blocking2-a: grep \".worker-mode/state\" /tmp/log.txt → exempt (not spooled)", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: 'grep ".worker-mode/state" /tmp/log.txt' },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "grep .worker-mode/ pattern → exempt under loose match");
+});
+
+test("Blocking2-b: echo \".worker-mode/state/x\" → exempt (not spooled)", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: 'echo ".worker-mode/state/x"' },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "echo .worker-mode/ text → exempt under loose match");
+});
+
+test("Blocking2-c: curl https://example.com/.worker-mode/state/x → exempt (not spooled)", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: "curl https://example.com/.worker-mode/state/x" },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "curl URL with .worker-mode/ → exempt under loose match");
+});
+
+test("Blocking2-d: command with # .worker-mode/state/x comment → exempt (not spooled)", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: "cat /tmp/log.txt # .worker-mode/state/x" },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "comment with .worker-mode/ → exempt under loose match");
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// Codex 三审: 负向过滤导致的漏豁免 — 宽松匹配修复
+// 这些命令之前被负向过滤误伤（echo/grep/rg 命令名识别跳过 operand），
+// 导致 .worker-mode/ 路径被错误 spool。宽松匹配下应豁免。
+// ══════════════════════════════════════════════════════════════════════════════════
+
+test("Codex3-a: echo ok && cat .worker-mode/state/x → exempt (not spooled)", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: "echo ok && cat .worker-mode/state/x" },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "echo ok && cat .worker-mode/state/x must be redline");
+});
+
+test("Codex3-b: grep -e TODO .worker-mode/state/x → exempt (not spooled)", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: "grep -e TODO .worker-mode/state/x" },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "grep -e TODO .worker-mode/state/x must be redline");
+});
+
+test("Codex3-c: grep --regexp=TODO .worker-mode/state/x → exempt (not spooled)", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: "grep --regexp=TODO .worker-mode/state/x" },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "grep --regexp=TODO .worker-mode/state/x must be redline");
+});
+
+test("Codex3-d: rg -e TODO .worker-mode/state/x → exempt (not spooled)", () => {
+  const payload = bashPayload(bigText(200), {
+    tool_input: { command: "rg -e TODO .worker-mode/state/x" },
+  });
+  const r = runHook(payload);
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "rg -e TODO .worker-mode/state/x must be redline");
+});
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// Codex 二审 Blocking 3: 补豁免边界测试（确认 regex 目录段匹配正确）
+// ══════════════════════════════════════════════════════════════════════════════════
+
+test("Blocking3-a: Read /a/.worker-mode/b → not spooled", () => {
+  const r = runHook(readPayload(bigText(200), "/a/.worker-mode/b"));
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "/a/.worker-mode/b must be redline");
+});
+
+test("Blocking3-b: Read /a/.worker-mode (结尾无斜杠) → not spooled", () => {
+  const r = runHook(readPayload(bigText(200), "/a/.worker-mode"));
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "/a/.worker-mode must be redline");
+});
+
+test("Blocking3-c: Read ./.worker-mode/state/current.json → not spooled", () => {
+  const r = runHook(readPayload(bigText(200), "./.worker-mode/state/current.json"));
+  assert.equal(r.status, 0);
+  assert.equal(parseHookOutput(r.stdout), null, "./.worker-mode/state/current.json must be redline");
 });

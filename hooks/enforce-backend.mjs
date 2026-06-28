@@ -36,7 +36,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // ── allow / deny output helpers ───────────────────────────────────────────────
 
 const OUTPUT_LIMIT_MARKER = "[输出限制]";
-const DEFAULT_OUTPUT_LIMIT_CHARS = 2000;
+const DEFAULT_OUTPUT_LIMIT_CHARS = 1200;
 
 function parseOutputLimit() {
   const raw = (process.env.WORKER_OUTPUT_LIMIT || "").trim();
@@ -52,15 +52,21 @@ function hasOutputLimitInstruction(text) {
 
 function buildOutputLimitInstruction(limitChars) {
   return (
-    `${OUTPUT_LIMIT_MARKER} 你的最终回报请控制在 ${limitChars} 字符以内。` +
-    `如果分析内容超出此限制，先将详细分析写入文件，再在最终回报中只给出结论摘要和文件路径。`
+    `${OUTPUT_LIMIT_MARKER} 强制 artifact-first 规则:\n` +
+    `1. 详细分析/代码块/表格→先写入文件\n` +
+    `2. 回报只允许此格式，总长≤${limitChars}字符:\n` +
+    `   结论: {1-2句}\n` +
+    `   关键发现: {≤3条，每条一行}\n` +
+    `   关键文件: {逗号分隔}\n` +
+    `   详细报告: {文件路径}\n` +
+    `   风险: {有则写，无则none}\n` +
+    `3. 不要把详细分析直接放入回报正文。`
   );
 }
 
 function buildOutputLimitContext(limitChars) {
   return (
-    `${OUTPUT_LIMIT_MARKER} 最终回报控制在 ${limitChars} 字符以内。` +
-    `超出部分写入文件，回报只给摘要。`
+    `${OUTPUT_LIMIT_MARKER} 最终回报≤${limitChars}字符。详细内容→文件，回报只给摘要+路径。`
   );
 }
 

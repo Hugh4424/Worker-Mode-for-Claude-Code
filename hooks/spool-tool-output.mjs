@@ -9,9 +9,11 @@
 //
 // Node ESM, zero external dependencies.
 //
-// ponytail: PostToolUseFailure not wired — failed Bash output still reaches
-// foreman context. Upgrade path: add PostToolUseFailure entry in hooks.json
-// pointing to this same script (payload shape is identical for failure events).
+// ponytail: PostToolUseFailure CANNOT reuse this script. Its payload shape is
+// { tool_name, tool_input, error, session_id, agent_id } with NO tool_response
+// field — only an error string. This script needs tool_response to extract text,
+// so it will always fail-open on failure events. Spooling failure output requires
+// a separate script that reads payload.error directly (not in this batch).
 
 import { readFileSync, mkdirSync, writeFileSync, appendFileSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
@@ -44,21 +46,12 @@ try {
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
-// Redline keywords: paths containing these are exempted from spooling regardless
-// of size. These are the authoritative inputs the foreman MUST see in full.
-const REDLINE_KEYWORDS = [
-  "state",
-  "current.json",
-  "contract",
-  "stage",
-  "gate",
-  ".worker-mode",
-  "reviews",
-  "journal",
-  "progress",
-  "handoff",
-  "decision",
-];
+// Redline: only paths inside a .worker-mode/ directory segment are exempt from
+// spooling — these are Worker-Mode's own state files the foreman must read in full.
+// Uses directory-segment boundary matching (not substring includes) so that
+// /tmp/foo.worker-mode-backup/x or /repo/bar.worker-mode.md are NOT exempted.
+// The `=` boundary preserves Bash env-assignment tokens like FILE=.worker-mode/state/x.
+const WORKER_MODE_SEGMENT_RE = /(^|[=\/])\.worker-mode([\/]|$)/;
 
 // Head/tail line count for summary.
 // ponytail: fixed head+tail truncation may drop critical middle content (e.g. a
@@ -78,8 +71,35 @@ const SPOOL_CLEANUP_FRACTION = 0.20;      // delete oldest 20%
 
 function isRedlinePath(pathStr) {
   if (typeof pathStr !== "string" || !pathStr) return false;
-  const lower = pathStr.toLowerCase();
-  return REDLINE_KEYWORDS.some((kw) => lower.includes(kw));
+  return WORKER_MODE_SEGMENT_RE.test(pathStr);
+}
+
+// ── Bash token scanner ────────────────────────────────────────────────────────
+// Loose matching: prefer false-exempt over false-spool.
+//
+// Redline errors are asymmetric:
+//   miss-exempt (fail to exempt a .worker-mode/ path) → foreman state reads
+//     are spool-truncated → SEVERE, breaks redline's core purpose.
+//   false-exempt (exempt a non-path .worker-mode/ mention like a grep pattern
+//     or echo text) → one big output misses spooling → MILD, coverage loss only.
+//
+// Therefore we deliberately avoid shell parsing — no command-name recognition,
+// no URL filtering, no comment stops, no pattern-operand skipping. Any token
+// that contains .worker-mode/ as a directory segment triggers exemption.
+// Returns the normalized token string, or "" if no worker-mode path found.
+function extractBashRedlinePath(cmd) {
+  if (!cmd || typeof cmd !== "string") return "";
+  const tokens = cmd.split(/\s+/);
+  if (tokens.length === 0) return "";
+
+  for (const t of tokens) {
+    // Normalize: strip ALL quotes so env assignments like
+    //   FILE=".worker-mode/state/x" → FILE=.worker-mode/state/x
+    // match the segment regex via the `=` boundary.
+    const normalized = t.replace(/["']/g, "");
+    if (isRedlinePath(normalized)) return normalized;
+  }
+  return "";
 }
 
 // Extract the "interesting path" from a tool invocation for redline checks.
@@ -87,29 +107,7 @@ function toolInputPath(toolName, toolInput) {
   if (!toolInput || typeof toolInput !== "object") return "";
   if (toolName === "Read") return toolInput.file_path || "";
   if (toolName === "Grep") return toolInput.path || "";
-  if (toolName === "Bash") {
-    // Only match tokens that explicitly reference a .worker-mode/ path.
-    // The old check (any token containing "/") was too broad: commands like
-    // `bash scripts/gate-check.sh` returned "scripts/gate-check.sh" which matched
-    // the "gate" redline keyword, causing large non-redline outputs to be silently
-    // skipped. Now we only exempt commands that operate on Worker-Mode state files.
-    //
-    // Additionally, strip leading/trailing quotes from each token before matching so
-    // that quoted paths like `cat ".worker-mode/state/current.json"` are caught.
-    // Variable-assignment tokens like `FILE=.worker-mode/state/x` are caught by the
-    // includes(".worker-mode/") check since the full token contains that substring.
-    const cmd = toolInput.command || "";
-    const tokens = cmd.split(/\s+/);
-    const workerModeToken = tokens.find((t) => {
-      const stripped = t.replace(/^["']|["']$/g, "");
-      return (
-        stripped.startsWith(".worker-mode/") ||
-        stripped.includes("/.worker-mode/") ||
-        stripped.includes(".worker-mode/")
-      );
-    });
-    return workerModeToken || "";
-  }
+  if (toolName === "Bash") return extractBashRedlinePath(toolInput.command || "");
   return "";
 }
 
@@ -298,7 +296,7 @@ function logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath }) {
       process.exit(0);
     }
 
-    // 4. Redline whitelist: authoritative inputs the foreman must see in full.
+    // 4. Redline: Worker-Mode state paths (.worker-mode/ directory) are exempt from spooling.
     const inputPath = toolInputPath(tool_name, tool_input);
     if (isRedlinePath(inputPath)) {
       action = "redline_skip";
@@ -415,11 +413,12 @@ function logEvent({ cwd, toolName, textBytes, textLines, action, spoolPath }) {
     }
 
     // d. Emit single JSON to stdout for Claude Code to consume.
-    // updatedToolOutput must be a JSON string (not the object itself).
+    // updatedToolOutput must be the raw object — Claude Code validates the shape
+    // and rejects strings ("expected object, received string").
     const out = {
       hookSpecificOutput: {
         hookEventName: "PostToolUse",
-        updatedToolOutput: JSON.stringify(updatedResponse),
+        updatedToolOutput: updatedResponse,
       },
     };
 

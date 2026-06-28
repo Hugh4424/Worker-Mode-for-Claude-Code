@@ -757,8 +757,8 @@ test("allowed Task dispatch → inject output limit into updatedInput.prompt and
   assert.equal(parsed?.hookSpecificOutput?.permissionDecision, "allow");
   assert.equal(updatedInput(result)?.description, "short task");
   assert.match(updatedInput(result)?.prompt || "", /Investigate and report\./);
-  assert.match(updatedInput(result)?.prompt || "", /\[输出限制\].*2000 字符以内/);
-  assert.match(parsed?.hookSpecificOutput?.additionalContext || "", /\[输出限制\].*2000 字符以内/);
+  assert.match(updatedInput(result)?.prompt || "", /\[输出限制\].*强制 artifact-first 规则/);
+  assert.match(parsed?.hookSpecificOutput?.additionalContext || "", /\[输出限制\].*最终回报≤1200字符/);
 });
 
 // ── test 24: existing output limit marker is not duplicated ─────────────────
@@ -826,5 +826,5 @@ test("WORKER_OUTPUT_LIMIT=4000 → injected prompt uses 4000 chars", () => {
   });
 
   assert.equal(parseDecision(result), "allow", "dispatch should be allowed\nstdout: " + result.stdout);
-  assert.match(updatedInput(result)?.prompt || "", /4000 字符以内/);
+  assert.match(updatedInput(result)?.prompt || "", /\[输出限制\].*强制 artifact-first 规则/);
 });

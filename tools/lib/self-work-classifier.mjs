@@ -17,10 +17,24 @@
 //
 // Node ESM, zero external dependencies.
 
+// ── env helper ─────────────────────────────────────────────────────────────────────
+// Parses a positive integer from an env var, falling back on invalid/missing values.
+// Called at module-load time so constants are stable across a single process run —
+// critical for check-context-health (retrospective analysis must see consistent
+// thresholds within one invocation).
+export function envInt(name, fallback) {
+  const raw = process.env[name];
+  if (typeof raw !== "string" || raw.trim() === "") return fallback;
+  const n = Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+
 // ── exported constants ────────────────────────────────────────────────────────────
 // Shared by all consumers; change here, not in each caller.
-export const BIG_CHUNK_LINES = 50;
-export const BIG_CHUNK_BYTES = 4000;
+// Evaluated once at module-import time (not on every reference) so that
+// check-context-health sees stable thresholds within a single process run.
+export const BIG_CHUNK_LINES = envInt("WORKER_SPOOL_BIG_LINES", 50);
+export const BIG_CHUNK_BYTES = envInt("WORKER_SPOOL_BIG_BYTES", 4000);
 export const COMPACTION_DROP_TOKENS = 100000;
 
 // ── internal tool sets ────────────────────────────────────────────────────────────
