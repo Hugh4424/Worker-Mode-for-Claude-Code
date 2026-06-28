@@ -19,7 +19,116 @@ const {
   COMPACTION_DROP_TOKENS,
   isBigSelfChunk,
   aggregateDelegatable,
+  envInt,
 } = await import(classifierPath);
+
+// ── envInt (env-configurable threshold parser) ─────────────────────────────────────
+// envInt is the parsing helper behind BIG_CHUNK_LINES / BIG_CHUNK_BYTES.
+// It reads a raw env value and returns a sanitized positive integer, or the fallback.
+// The constants call envInt at module-load time so check-context-health sees stable
+// thresholds within a single run. These tests exercise the parsing logic directly.
+
+test("envInt: env unset → fallback", () => {
+  assert.equal(envInt("WORKER_SPOOL_BIG_LINES", 50), 50);
+  assert.equal(envInt("WORKER_SPOOL_BIG_BYTES", 4000), 4000);
+});
+
+test("envInt: env set to a valid positive integer → uses that value", () => {
+  process.env.WORKER_SPOOL_BIG_LINES = "80";
+  process.env.WORKER_SPOOL_BIG_BYTES = "6000";
+  try {
+    assert.equal(envInt("WORKER_SPOOL_BIG_LINES", 50), 80);
+    assert.equal(envInt("WORKER_SPOOL_BIG_BYTES", 4000), 6000);
+  } finally {
+    delete process.env.WORKER_SPOOL_BIG_LINES;
+    delete process.env.WORKER_SPOOL_BIG_BYTES;
+  }
+});
+
+test("envInt: env set to 0 → fallback (0 is not a valid threshold)", () => {
+  process.env.WORKER_SPOOL_BIG_LINES = "0";
+  try {
+    assert.equal(envInt("WORKER_SPOOL_BIG_LINES", 50), 50);
+  } finally {
+    delete process.env.WORKER_SPOOL_BIG_LINES;
+  }
+});
+
+test("envInt: env set to negative → fallback", () => {
+  process.env.WORKER_SPOOL_BIG_LINES = "-5";
+  try {
+    assert.equal(envInt("WORKER_SPOOL_BIG_LINES", 50), 50);
+  } finally {
+    delete process.env.WORKER_SPOOL_BIG_LINES;
+  }
+});
+
+test("envInt: env set to empty string → fallback", () => {
+  process.env.WORKER_SPOOL_BIG_LINES = "";
+  try {
+    assert.equal(envInt("WORKER_SPOOL_BIG_LINES", 50), 50);
+  } finally {
+    delete process.env.WORKER_SPOOL_BIG_LINES;
+  }
+});
+
+test("envInt: env set to whitespace only → fallback", () => {
+  process.env.WORKER_SPOOL_BIG_LINES = "   ";
+  try {
+    assert.equal(envInt("WORKER_SPOOL_BIG_LINES", 50), 50);
+  } finally {
+    delete process.env.WORKER_SPOOL_BIG_LINES;
+  }
+});
+
+test("envInt: env set to non-number → fallback", () => {
+  process.env.WORKER_SPOOL_BIG_LINES = "abc";
+  try {
+    assert.equal(envInt("WORKER_SPOOL_BIG_LINES", 50), 50);
+  } finally {
+    delete process.env.WORKER_SPOOL_BIG_LINES;
+  }
+});
+
+test("envInt: env set to NaN → fallback", () => {
+  process.env.WORKER_SPOOL_BIG_LINES = "NaN";
+  try {
+    assert.equal(envInt("WORKER_SPOOL_BIG_LINES", 50), 50);
+  } finally {
+    delete process.env.WORKER_SPOOL_BIG_LINES;
+  }
+});
+
+test("envInt: env set to float → truncated to integer (Number.parseInt behaviour)", () => {
+  process.env.WORKER_SPOOL_BIG_LINES = "3.14";
+  try {
+    assert.equal(envInt("WORKER_SPOOL_BIG_LINES", 50), 3);
+  } finally {
+    delete process.env.WORKER_SPOOL_BIG_LINES;
+  }
+});
+
+// parseInt 宽松解析：数字开头后跟非数字字符时，取前导数字部分回落。
+// 这是刻意接受的行为（宽松配置解析），不是 bug。此测试将当前语义锁入防回归。
+test("envInt: env starts with digits followed by non-digits → parseInt returns leading digits (lenient, accepted)", () => {
+  process.env.WORKER_SPOOL_BIG_LINES = "50abc";
+  try {
+    assert.equal(envInt("WORKER_SPOOL_BIG_LINES", 50), 50);
+  } finally {
+    delete process.env.WORKER_SPOOL_BIG_LINES;
+  }
+});
+
+test("envInt: lines and bytes envs are independent", () => {
+  process.env.WORKER_SPOOL_BIG_LINES = "120";
+  // WORKER_SPOOL_BIG_BYTES unset → should fall back
+  try {
+    assert.equal(envInt("WORKER_SPOOL_BIG_LINES", 50), 120);
+    assert.equal(envInt("WORKER_SPOOL_BIG_BYTES", 4000), 4000);
+  } finally {
+    delete process.env.WORKER_SPOOL_BIG_LINES;
+  }
+});
 
 // ── constant exports ──────────────────────────────────────────────────────────────
 
