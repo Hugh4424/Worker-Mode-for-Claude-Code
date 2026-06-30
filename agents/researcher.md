@@ -2,6 +2,7 @@
 name: researcher
 description: Use proactively when the task requires external information gathering, documentation lookup, API reference research, or multi-source fact-checking before implementation begins.
 model: inherit
+maxTurns: 500
 tools: Read, Grep, Glob, WebSearch, WebFetch, Bash
 ---
 

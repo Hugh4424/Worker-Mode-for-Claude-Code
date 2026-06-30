@@ -2,6 +2,7 @@
 name: fixer
 description: Use proactively when a reviewer finding or test failure has been identified and needs to be reproduced, root-caused, and patched before re-verification.
 model: inherit
+maxTurns: 500
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

@@ -45,6 +45,10 @@ test("file-reader.md description has proactively wording", () => {
   const { frontmatter } = readWorker("file-reader.md");
   assert.match(frontmatter, /description:[\s\S]*proactively/i, "file-reader.md description must say 'Use proactively'");
 });
+test("file-reader.md pins explicit maxTurns for long-running delegated work", () => {
+  const { frontmatter } = readWorker("file-reader.md");
+  assert.match(frontmatter, /^maxTurns: 500$/m, "file-reader.md frontmatter must pin maxTurns: 500");
+});
 
 // --- researcher.md --------------------------------------------------------
 test("researcher.md body carries BOTH summary-only contract anchors", () => {
@@ -55,6 +59,10 @@ test("researcher.md body carries BOTH summary-only contract anchors", () => {
 test("researcher.md description has proactively wording", () => {
   const { frontmatter } = readWorker("researcher.md");
   assert.match(frontmatter, /description:[\s\S]*proactively/i, "researcher.md description must say 'Use proactively'");
+});
+test("researcher.md pins explicit maxTurns for long-running delegated work", () => {
+  const { frontmatter } = readWorker("researcher.md");
+  assert.match(frontmatter, /^maxTurns: 500$/m, "researcher.md frontmatter must pin maxTurns: 500");
 });
 
 // --- implementer.md -------------------------------------------------------
@@ -67,6 +75,10 @@ test("implementer.md description has proactively wording", () => {
   const { frontmatter } = readWorker("implementer.md");
   assert.match(frontmatter, /description:[\s\S]*proactively/i, "implementer.md description must say 'Use proactively'");
 });
+test("implementer.md pins explicit maxTurns for long-running delegated work", () => {
+  const { frontmatter } = readWorker("implementer.md");
+  assert.match(frontmatter, /^maxTurns: 500$/m, "implementer.md frontmatter must pin maxTurns: 500");
+});
 
 // --- reviewer.md ----------------------------------------------------------
 test("reviewer.md body carries BOTH summary-only contract anchors", () => {
@@ -77,6 +89,10 @@ test("reviewer.md body carries BOTH summary-only contract anchors", () => {
 test("reviewer.md description has proactively wording", () => {
   const { frontmatter } = readWorker("reviewer.md");
   assert.match(frontmatter, /description:[\s\S]*proactively/i, "reviewer.md description must say 'Use proactively'");
+});
+test("reviewer.md pins explicit maxTurns for long-running delegated work", () => {
+  const { frontmatter } = readWorker("reviewer.md");
+  assert.match(frontmatter, /^maxTurns: 500$/m, "reviewer.md frontmatter must pin maxTurns: 500");
 });
 
 // --- qa.md ----------------------------------------------------------------
@@ -89,6 +105,10 @@ test("qa.md description has proactively wording", () => {
   const { frontmatter } = readWorker("qa.md");
   assert.match(frontmatter, /description:[\s\S]*proactively/i, "qa.md description must say 'Use proactively'");
 });
+test("qa.md pins explicit maxTurns for long-running delegated work", () => {
+  const { frontmatter } = readWorker("qa.md");
+  assert.match(frontmatter, /^maxTurns: 500$/m, "qa.md frontmatter must pin maxTurns: 500");
+});
 
 // --- fixer.md -------------------------------------------------------------
 test("fixer.md body carries BOTH summary-only contract anchors", () => {
@@ -99,4 +119,14 @@ test("fixer.md body carries BOTH summary-only contract anchors", () => {
 test("fixer.md description has proactively wording", () => {
   const { frontmatter } = readWorker("fixer.md");
   assert.match(frontmatter, /description:[\s\S]*proactively/i, "fixer.md description must say 'Use proactively'");
+});
+test("fixer.md pins explicit maxTurns for long-running delegated work", () => {
+  const { frontmatter } = readWorker("fixer.md");
+  assert.match(frontmatter, /^maxTurns: 500$/m, "fixer.md frontmatter must pin maxTurns: 500");
+});
+
+// --- coordinator.md -------------------------------------------------------
+test("coordinator.md pins explicit maxTurns for long-running foreman work", () => {
+  const { frontmatter } = readWorker("coordinator.md");
+  assert.match(frontmatter, /^maxTurns: 500$/m, "coordinator.md frontmatter must pin maxTurns: 500");
 });

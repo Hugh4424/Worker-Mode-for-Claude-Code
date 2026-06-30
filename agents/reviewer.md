@@ -2,6 +2,7 @@
 name: reviewer
 description: Use proactively when a deliverable (code, design, spec, config) needs independent review before it can be accepted — especially after implementation or before merging.
 model: inherit
+maxTurns: 500
 tools: Read, Grep, Glob, Bash
 ---
 
