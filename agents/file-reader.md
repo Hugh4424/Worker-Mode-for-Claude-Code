@@ -2,6 +2,7 @@
 name: file-reader
 description: Use proactively when the task involves reading large files, long logs, entire codebases, or any content too heavy for the orchestrator to load into its own context.
 model: inherit
+maxTurns: 500
 tools: Read, Grep, Glob, Bash
 ---
 

@@ -2,6 +2,7 @@
 name: coordinator
 description: Foreman-identity agent for the orchestrator (main session). It carries the authoritative delegation guidance — default mode is dispatch/delegate/summarize/judge, with the four red-line activities the orchestrator must do itself. Tool-stripped by design — physically NO Write/Edit/MultiEdit (the core "write code yourself" hands are removed, so authoring must be delegated). Retains Bash/Read/Grep/Glob for red-line work the foreman MUST do itself: run gate/advance scripts, read state.json/journal/progress (often outside cwd), resolve paths/env vars, emit transcript paths. Task for dispatch.
 model: inherit
+maxTurns: 500
 tools: ["Task", "Bash", "Read", "Grep", "Glob", "TodoWrite", "AskUserQuestion", "WebSearch", "WebFetch"]
 ---
 

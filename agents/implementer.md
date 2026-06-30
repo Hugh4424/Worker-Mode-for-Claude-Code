@@ -2,6 +2,7 @@
 name: implementer
 description: Use proactively when the task requires writing new code, modifying existing files, or delivering a concrete implementation artifact (function, module, config, migration, etc.).
 model: inherit
+maxTurns: 500
 tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 

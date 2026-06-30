@@ -2,6 +2,7 @@
 name: qa
 description: Use proactively when tests need to be run, end-to-end acceptance needs to be verified, or evidence of correctness must be collected before a stage can be closed.
 model: inherit
+maxTurns: 500
 tools: Read, Bash, Grep, Glob
 ---
 
